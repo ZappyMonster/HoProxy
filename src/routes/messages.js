@@ -41,6 +41,11 @@ router.post('/messages', async (req, res) => {
       });
     }
 
+    // Log any warnings
+    if (authValidation.warnings?.length > 0) {
+      authValidation.warnings.forEach(warning => console.log(`[Auth Warning] ${warning}`));
+    }
+
     // Transform request
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest);
 

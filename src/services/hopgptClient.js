@@ -11,8 +11,11 @@ export class HopGPTClient {
       cf_clearance: config.cfClearance || process.env.HOPGPT_COOKIE_CF_CLEARANCE,
       connect_sid: config.connectSid || process.env.HOPGPT_COOKIE_CONNECT_SID,
       __cf_bm: config.cfBm || process.env.HOPGPT_COOKIE_CF_BM,
-      refreshToken: config.refreshToken || process.env.HOPGPT_COOKIE_REFRESH_TOKEN
+      refreshToken: config.refreshToken || process.env.HOPGPT_COOKIE_REFRESH_TOKEN,
+      token_provider: config.tokenProvider || process.env.HOPGPT_COOKIE_TOKEN_PROVIDER || 'librechat'
     };
+    this.autoRefresh = config.autoRefresh !== false;
+    this.isRefreshing = false;
   }
 
   /**
@@ -34,16 +37,110 @@ export class HopGPTClient {
     if (this.cookies.refreshToken) {
       cookies.push(`refreshToken=${this.cookies.refreshToken}`);
     }
+    if (this.cookies.token_provider) {
+      cookies.push(`token_provider=${this.cookies.token_provider}`);
+    }
 
     return cookies.join('; ');
   }
 
   /**
+   * Parse Set-Cookie headers and update internal cookie state
+   * @param {Headers} headers - Response headers
+   */
+  updateCookiesFromResponse(headers) {
+    const setCookieHeaders = headers.getSetCookie?.() || [];
+
+    for (const cookieStr of setCookieHeaders) {
+      const [cookiePart] = cookieStr.split(';');
+      const [name, value] = cookiePart.split('=');
+
+      if (name === 'refreshToken') {
+        this.cookies.refreshToken = value;
+        console.log('[HopGPT] Refresh token updated');
+      } else if (name === 'connect.sid') {
+        this.cookies.connect_sid = value;
+      } else if (name === 'cf_clearance') {
+        this.cookies.cf_clearance = value;
+      } else if (name === '__cf_bm') {
+        this.cookies.__cf_bm = value;
+      }
+    }
+  }
+
+  /**
+   * Refresh the bearer token using the refresh token
+   * @returns {Promise<boolean>} True if refresh succeeded
+   */
+  async refreshTokens() {
+    if (this.isRefreshing) {
+      // Wait for ongoing refresh to complete
+      await new Promise(resolve => setTimeout(resolve, 100));
+      return !!this.bearerToken;
+    }
+
+    if (!this.cookies.refreshToken) {
+      console.error('[HopGPT] No refresh token available');
+      return false;
+    }
+
+    this.isRefreshing = true;
+    console.log('[HopGPT] Attempting to refresh tokens...');
+
+    try {
+      const url = `${this.baseURL}/api/auth/refresh`;
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Origin': this.baseURL,
+        'Referer': `${this.baseURL}/`
+      };
+
+      const cookieHeader = this.buildCookieHeader();
+      if (cookieHeader) {
+        headers['Cookie'] = cookieHeader;
+      }
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: '{}'
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`[HopGPT] Token refresh failed: ${response.status} ${response.statusText}`, errorText);
+        return false;
+      }
+
+      // Parse the response to get the new bearer token
+      const data = await response.json();
+
+      if (data.token) {
+        this.bearerToken = data.token;
+        console.log('[HopGPT] Bearer token refreshed successfully');
+      }
+
+      // Update cookies from Set-Cookie headers (includes rotated refresh token)
+      this.updateCookiesFromResponse(response.headers);
+
+      return true;
+    } catch (error) {
+      console.error('[HopGPT] Token refresh error:', error.message);
+      return false;
+    } finally {
+      this.isRefreshing = false;
+    }
+  }
+
+  /**
    * Send a message to HopGPT
    * @param {object} hopGPTRequest - Request body in HopGPT format
+   * @param {boolean} isRetry - Whether this is a retry after token refresh
    * @returns {Response} Fetch response with SSE stream
    */
-  async sendMessage(hopGPTRequest) {
+  async sendMessage(hopGPTRequest, isRetry = false) {
     const url = `${this.baseURL}${this.endpoint}`;
 
     const headers = {
@@ -71,6 +168,17 @@ export class HopGPTClient {
     });
 
     if (!response.ok) {
+      // Check if this is an auth error and we can retry
+      if ((response.status === 401 || response.status === 403) && this.autoRefresh && !isRetry) {
+        console.log(`[HopGPT] Auth error (${response.status}), attempting token refresh...`);
+
+        const refreshed = await this.refreshTokens();
+        if (refreshed) {
+          console.log('[HopGPT] Retrying request with new token...');
+          return this.sendMessage(hopGPTRequest, true);
+        }
+      }
+
       const errorText = await response.text();
       throw new HopGPTError(
         response.status,
@@ -88,17 +196,26 @@ export class HopGPTClient {
    */
   validateAuth() {
     const missing = [];
+    const warnings = [];
 
-    if (!this.bearerToken) {
-      missing.push('HOPGPT_BEARER_TOKEN');
-    }
+    // Refresh token is required for auto-refresh to work
     if (!this.cookies.refreshToken) {
       missing.push('HOPGPT_COOKIE_REFRESH_TOKEN');
     }
 
+    // Bearer token is optional if refresh token is available (we can refresh it)
+    if (!this.bearerToken) {
+      if (this.cookies.refreshToken) {
+        warnings.push('HOPGPT_BEARER_TOKEN not set, will attempt to refresh on first request');
+      } else {
+        missing.push('HOPGPT_BEARER_TOKEN');
+      }
+    }
+
     return {
       valid: missing.length === 0,
-      missing
+      missing,
+      warnings
     };
   }
 }
