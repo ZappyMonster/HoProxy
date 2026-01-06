@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { transformAnthropicToHopGPT, extractThinkingConfig } from '../transformers/anthropicToHopGPT.js';
+import { transformAnthropicToHopGPT, extractThinkingConfig, normalizeSystemPrompt } from '../transformers/anthropicToHopGPT.js';
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
 import {
@@ -68,7 +68,11 @@ router.post('/messages', async (req, res) => {
       resetConversationState(sessionId);
     }
 
-    const conversationState = resetRequested ? null : getConversationState(sessionId);
+    const storedConversationState = resetRequested ? null : getConversationState(sessionId);
+    const requestConversationState = normalizeConversationState(
+      anthropicRequest.conversation_state || anthropicRequest.conversationState
+    );
+    const conversationState = mergeConversationStates(storedConversationState, requestConversationState);
 
     // Transform request
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest, conversationState);
@@ -77,10 +81,14 @@ router.post('/messages', async (req, res) => {
     // Extract thinking configuration for response transformer
     const thinkingConfig = extractThinkingConfig(anthropicRequest);
 
+    const systemPrompt = normalizeSystemPrompt(anthropicRequest.system) ??
+      normalizeSystemPrompt(conversationState?.systemPrompt ?? conversationState?.system);
+
     const transformerOptions = {
       thinkingEnabled: thinkingConfig.enabled,
       maxTokens: hopGPTRequest.max_tokens,
-      stopSequences: hopGPTRequest.stop_sequences
+      stopSequences: hopGPTRequest.stop_sequences,
+      systemPrompt
     };
 
     // Determine if streaming
@@ -97,7 +105,7 @@ router.post('/messages', async (req, res) => {
     }
 
     const nextState = transformer.getConversationState();
-    if (nextState?.lastAssistantMessageId || nextState?.conversationId) {
+    if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
       updateConversationState(sessionId, nextState);
     }
   } catch (error) {
@@ -196,6 +204,38 @@ function validateRequest(request) {
   }
 
   return null;
+}
+
+function normalizeConversationState(state) {
+  if (!state || typeof state !== 'object') {
+    return null;
+  }
+
+  return {
+    conversationId: state.conversationId || state.conversation_id || null,
+    lastAssistantMessageId: state.lastAssistantMessageId || state.last_assistant_message_id || null,
+    systemPrompt: state.systemPrompt || state.system_prompt || state.system || null
+  };
+}
+
+function mergeConversationStates(storedState, requestState) {
+  if (!storedState && !requestState) {
+    return null;
+  }
+
+  if (!storedState) {
+    return requestState;
+  }
+
+  if (!requestState) {
+    return storedState;
+  }
+
+  return {
+    conversationId: requestState.conversationId ?? storedState.conversationId,
+    lastAssistantMessageId: requestState.lastAssistantMessageId ?? storedState.lastAssistantMessageId,
+    systemPrompt: requestState.systemPrompt ?? storedState.systemPrompt
+  };
 }
 
 /**

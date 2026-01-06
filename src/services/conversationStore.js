@@ -80,7 +80,8 @@ export function getConversationState(sessionId) {
   entry.lastTouchedAt = Date.now();
   return {
     conversationId: entry.conversationId || null,
-    lastAssistantMessageId: entry.lastAssistantMessageId || null
+    lastAssistantMessageId: entry.lastAssistantMessageId || null,
+    systemPrompt: entry.systemPrompt || null
   };
 }
 
@@ -96,12 +97,16 @@ export function updateConversationState(sessionId, state) {
   const entry = sessionStore.get(normalizedSessionId) || { createdAt: now };
   const conversationId = normalizeId(state.conversationId);
   const lastAssistantMessageId = normalizeId(state.lastAssistantMessageId);
+  const systemPrompt = normalizeId(state.systemPrompt);
 
   if (conversationId) {
     entry.conversationId = conversationId;
   }
   if (lastAssistantMessageId) {
     entry.lastAssistantMessageId = lastAssistantMessageId;
+  }
+  if (systemPrompt) {
+    entry.systemPrompt = systemPrompt;
   }
 
   entry.lastTouchedAt = now;

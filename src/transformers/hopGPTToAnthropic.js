@@ -80,6 +80,7 @@ export class HopGPTToAnthropicTransformer {
     this.outputTokens = 0;
     this.conversationId = null;
     this.responseMessageId = null;
+    this.systemPrompt = options.systemPrompt ?? null;
 
     // Thinking support
     this.thinkingEnabled = options.thinkingEnabled ?? isThinkingModel(model);
@@ -699,7 +700,8 @@ export class HopGPTToAnthropicTransformer {
   getConversationState() {
     return {
       conversationId: this.conversationId,
-      lastAssistantMessageId: this.responseMessageId
+      lastAssistantMessageId: this.responseMessageId,
+      systemPrompt: this.systemPrompt
     };
   }
 }
