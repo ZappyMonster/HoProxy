@@ -41,12 +41,12 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
 
 3. **Start the server:**
 
-   With npx (no install, uses `.env` in the current directory):
+   From this repo root (no publish required):
    ```bash
-   npx hopgpt-anthropic-proxy start
+   npx . start
    ```
 
-   With a local install:
+   Or with a local install:
    ```bash
    npm start
    ```
