@@ -49,6 +49,74 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
    npm run dev
    ```
 
+## Claude Code Setup
+
+Configure Claude Code to talk to HoProxy's local Anthropic-compatible endpoint.
+
+### 1) Install Claude Code
+
+**macOS/Linux (recommended):**
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+**npm (requires Node.js 18+):**
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+### 2) Extract HopGPT credentials
+
+If you have not already done this in the main setup, run:
+```bash
+npm run extract
+```
+
+This writes a `.env` file with the required HopGPT cookies/tokens. If you need the manual path, follow the steps in the main **Setup** section above.
+
+### 3) Configure Claude Code `settings.json`
+
+Create or edit `~/.claude/settings.json`:
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "test",
+    "ANTHROPIC_BASE_URL": "http://localhost:3000",
+    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
+  }
+}
+```
+
+Restart Claude Code after editing. HoProxy does not validate the auth token, but Claude Code requires a non-empty value.
+
+### 4) Environment variable configuration
+
+If you prefer shell environment variables instead of `settings.json`:
+```bash
+export ANTHROPIC_AUTH_TOKEN=test
+export ANTHROPIC_BASE_URL=http://localhost:3000
+export ANTHROPIC_MODEL=claude-sonnet-4-20250514
+```
+
+### 5) Troubleshooting common issues
+
+- **Connection refused**: Ensure HoProxy is running and listening on `http://localhost:3000`.
+- **`authentication_error` from HoProxy**: Your HopGPT cookies/tokens are missing or expired. Re-run `npm run extract` and restart the server.
+- **401/403 from HopGPT**: The refresh token likely expired; re-authenticate and re-extract credentials.
+- **Model warning or not found**: Use a supported model from the list below or update `ANTHROPIC_MODEL`.
+- **Claude Code still calling Anthropic**: Confirm `ANTHROPIC_BASE_URL` is set and restart Claude Code.
+
+### 6) Available models and their capabilities
+
+| Model (canonical) | HopGPT backend | Capability notes |
+|-------------------|----------------|------------------|
+| `claude-opus-4-5-thinking` | `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. |
+| `claude-sonnet-4-5-thinking` | `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. |
+
+Aliases accepted by the proxy include:
+- `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4.5-thinking`
+- `claude-sonnet-4-5`, `claude-sonnet-4.5`, `claude-sonnet-4.5-thinking`
+
 ## Usage
 
 ### With Anthropic SDK (Python)
