@@ -3,6 +3,7 @@ import { transformAnthropicToHopGPT, extractThinkingConfig } from '../transforme
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
 import { pipeSSEStream, parseSSEStream } from '../utils/sseParser.js';
+import { resolveModelMapping } from '../utils/modelMapping.js';
 
 const router = Router();
 
@@ -46,8 +47,15 @@ router.post('/messages', async (req, res) => {
       authValidation.warnings.forEach(warning => console.log(`[Auth Warning] ${warning}`));
     }
 
+    // Resolve model mapping for HopGPT and response model names
+    const modelMapping = resolveModelMapping(anthropicRequest.model);
+    if (!modelMapping.mapped && anthropicRequest.model) {
+      console.warn(`[Model Warning] Unmapped model "${anthropicRequest.model}", using as-is`);
+    }
+
     // Transform request
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest);
+    hopGPTRequest.model = modelMapping.hopgptModel || hopGPTRequest.model;
 
     // Extract thinking configuration for response transformer
     const thinkingConfig = extractThinkingConfig(anthropicRequest);
@@ -61,10 +69,12 @@ router.post('/messages', async (req, res) => {
     // Determine if streaming
     const isStreaming = anthropicRequest.stream === true;
 
+    const responseModel = modelMapping.responseModel || anthropicRequest.model;
+
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, anthropicRequest.model, transformerOptions, res);
+      await handleStreamingRequest(client, hopGPTRequest, responseModel, transformerOptions, res);
     } else {
-      await handleNonStreamingRequest(client, hopGPTRequest, anthropicRequest.model, transformerOptions, res);
+      await handleNonStreamingRequest(client, hopGPTRequest, responseModel, transformerOptions, res);
     }
   } catch (error) {
     handleError(error, res);
