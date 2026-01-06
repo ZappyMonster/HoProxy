@@ -17,7 +17,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "extract": "node src/extract-credentials.js"
+    "extract": "node src/extract-credentials.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "dotenv": "^16.3.1",
@@ -25,6 +27,10 @@
     "express": "^4.18.2",
     "puppeteer": "^24.34.0",
     "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "supertest": "^7.1.4",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=18.0.0"
