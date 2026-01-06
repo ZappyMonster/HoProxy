@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import messagesRouter from './routes/messages.js';
+import modelsRouter from './routes/models.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -37,6 +38,7 @@ app.get('/health', (req, res) => {
 
 // Mount Anthropic-compatible API routes
 app.use('/v1', messagesRouter);
+app.use('/v1', modelsRouter);
 
 // 404 handler
 app.use((req, res) => {
@@ -71,6 +73,7 @@ app.listen(PORT, () => {
 ║                                                            ║
 ║  Endpoints:                                                ║
 ║    POST /v1/messages  - Anthropic Messages API             ║
+║    GET  /v1/models    - List available models              ║
 ║    GET  /health       - Health check                       ║
 ║                                                            ║
 ║  Usage with Anthropic SDK:                                 ║
