@@ -2,18 +2,49 @@
  * Browser Credential Extraction Module
  * Automatically extracts HopGPT credentials by opening a browser session
  */
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import fs from 'fs';
 import path from 'path';
 
 const HOPGPT_URL = 'https://chat.ai.jh.edu';
 const CHAT_API_ENDPOINT = '/api/agents/chat/AnthropicClaude';
 
+puppeteer.use(StealthPlugin());
+
+async function launchBrowser(options = {}) {
+  const launchOptions = {
+    headless: false,
+    defaultViewport: null,
+    args: ['--start-maximized']
+  };
+
+  const userDataDir = options.userDataDir || process.env.HOPGPT_PUPPETEER_USER_DATA_DIR;
+  if (userDataDir) {
+    launchOptions.userDataDir = userDataDir;
+  }
+
+  const channel = options.channel || process.env.HOPGPT_PUPPETEER_CHANNEL || 'chrome';
+
+  try {
+    return await puppeteer.launch({ ...launchOptions, channel });
+  } catch (error) {
+    if (!options.channel && !process.env.HOPGPT_PUPPETEER_CHANNEL) {
+      console.warn(`Failed to launch Chrome channel (${channel}). Falling back to bundled Chromium.`);
+      return await puppeteer.launch(launchOptions);
+    }
+
+    throw error;
+  }
+}
+
 /**
  * Extract credentials from a browser session
  * @param {object} options - Configuration options
  * @param {string} options.envPath - Path to write .env file (default: .env in project root)
  * @param {number} options.timeout - Timeout in ms to wait for login (default: 5 minutes)
+ * @param {string} options.userDataDir - Chrome user data directory (optional)
+ * @param {string} options.channel - Chrome release channel for Puppeteer (optional)
  * @returns {Promise<object>} Extracted credentials
  */
 export async function extractCredentials(options = {}) {
@@ -24,11 +55,7 @@ export async function extractCredentials(options = {}) {
   console.log('Opening browser to HopGPT login page...');
   console.log('Please complete the login process in the browser window.\n');
 
-  const browser = await puppeteer.launch({
-    headless: false,
-    defaultViewport: null,
-    args: ['--start-maximized']
-  });
+  const browser = await launchBrowser(options);
 
   const page = await browser.newPage();
 
