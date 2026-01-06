@@ -26,6 +26,8 @@
     "eventsource-parser": "^1.1.1",
     "express": "^4.18.2",
     "puppeteer": "^24.34.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

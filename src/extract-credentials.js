@@ -28,6 +28,10 @@ Options:
   --timeout <seconds>  Timeout to wait for login (default: 300 seconds)
   --help, -h           Show this help message
 
+Environment:
+  HOPGPT_PUPPETEER_CHANNEL       Chrome channel for Puppeteer (default: chrome)
+  HOPGPT_PUPPETEER_USER_DATA_DIR Chrome user data directory (optional)
+
 Example:
   npm run extract
   npm run extract -- --timeout 600
