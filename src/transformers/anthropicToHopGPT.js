@@ -119,6 +119,24 @@ function extractMessageContent(message) {
   return parts.join('\n\n');
 }
 
+function normalizeMaxTokens(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const intValue = Math.floor(value);
+  return intValue > 0 ? intValue : null;
+}
+
+function normalizeStopSequences(value) {
+  if (Array.isArray(value)) {
+    return value.filter(seq => typeof seq === 'string' && seq.length > 0);
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    return [value];
+  }
+  return [];
+}
+
 /**
  * Extract thinking configuration from Anthropic request
  * @param {object} anthropicRequest - Anthropic API request body
@@ -202,7 +220,7 @@ function extractTextAndImages(content, imageDetail) {
  * @returns {object} HopGPT request body
  */
 export function transformAnthropicToHopGPT(anthropicRequest, conversationState = null) {
-  const { model, messages, system, tools, tool_choice } = anthropicRequest;
+  const { model, messages, system, tools, tool_choice, max_tokens, stop_sequences } = anthropicRequest;
   const imageDetail = 'high';
 
   // Get thinking configuration
@@ -300,6 +318,15 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
 
   if (images.length > 0) {
     hopGPTRequest.image_urls = images;
+  }
+
+  const maxTokens = normalizeMaxTokens(max_tokens);
+  const stopSequences = normalizeStopSequences(stop_sequences);
+  if (maxTokens !== null) {
+    hopGPTRequest.max_tokens = maxTokens;
+  }
+  if (stopSequences.length > 0) {
+    hopGPTRequest.stop_sequences = stopSequences;
   }
 
   // Add tools if provided

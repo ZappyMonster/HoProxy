@@ -29,6 +29,44 @@ function generateToolUseId() {
   return result;
 }
 
+function normalizeMaxTokens(value) {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const intValue = Math.floor(value);
+  return intValue > 0 ? intValue : null;
+}
+
+function normalizeStopSequences(value) {
+  if (Array.isArray(value)) {
+    return value.filter(seq => typeof seq === 'string' && seq.length > 0);
+  }
+  if (typeof value === 'string' && value.length > 0) {
+    return [value];
+  }
+  return [];
+}
+
+function mapStopReason(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.toLowerCase();
+  if (normalized === 'stop_sequence' || normalized === 'stop-sequence' || normalized === 'stopsequence') {
+    return 'stop_sequence';
+  }
+  if (normalized === 'max_tokens' || normalized === 'max-tokens' || normalized === 'length' || normalized === 'max_tokens_exceeded') {
+    return 'max_tokens';
+  }
+  if (normalized === 'tool_use' || normalized === 'tool-use' || normalized === 'tool' || normalized === 'function_call') {
+    return 'tool_use';
+  }
+  if (normalized === 'end_turn' || normalized === 'end-turn' || normalized === 'stop' || normalized === 'eos') {
+    return 'end_turn';
+  }
+  return null;
+}
+
 /**
  * Transformer class to convert HopGPT SSE events to Anthropic SSE format
  * Supports extended thinking and tool use for compatible models
@@ -59,6 +97,11 @@ export class HopGPTToAnthropicTransformer {
     this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
     this.accumulatedToolUses = []; // All completed tool uses
     this.hasToolUse = false;      // Track if response contains tool use
+
+    this.maxTokens = normalizeMaxTokens(options.maxTokens);
+    this.stopSequences = normalizeStopSequences(options.stopSequences);
+    this.hopGPTStopReason = null;
+    this.hopGPTStopSequence = null;
   }
 
   /**
@@ -117,6 +160,14 @@ export class HopGPTToAnthropicTransformer {
       this.responseMessageId = data.responseMessage?.messageId;
       this.inputTokens = data.responseMessage?.promptTokens || 0;
       this.outputTokens = data.responseMessage?.tokenCount || 0;
+      this.hopGPTStopReason = data.responseMessage?.stopReason ??
+        data.responseMessage?.stop_reason ??
+        data.responseMessage?.finishReason ??
+        data.responseMessage?.finish_reason ??
+        null;
+      this.hopGPTStopSequence = data.responseMessage?.stopSequence ??
+        data.responseMessage?.stop_sequence ??
+        null;
 
       // Check for thoughtSignature in final response
       if (data.responseMessage?.thoughtSignature) {
@@ -329,6 +380,64 @@ export class HopGPTToAnthropicTransformer {
     }
   }
 
+  _getGeneratedText() {
+    if (this.contentBlocks.length > 0) {
+      return this.contentBlocks
+        .filter(block => block.type === 'text' && typeof block.text === 'string')
+        .map(block => block.text)
+        .join('');
+    }
+
+    return this.accumulatedText || '';
+  }
+
+  _detectStopSequence() {
+    if (!this.stopSequences || this.stopSequences.length === 0) {
+      return null;
+    }
+
+    const text = this._getGeneratedText();
+    if (!text) {
+      return null;
+    }
+
+    for (const sequence of this.stopSequences) {
+      if (sequence && text.endsWith(sequence)) {
+        return sequence;
+      }
+    }
+
+    return null;
+  }
+
+  _determineStopInfo() {
+    if (this.hasToolUse) {
+      return { stopReason: 'tool_use', stopSequence: null };
+    }
+
+    const mappedReason = mapStopReason(this.hopGPTStopReason);
+    if (mappedReason) {
+      if (mappedReason === 'stop_sequence') {
+        const sequence = typeof this.hopGPTStopSequence === 'string' && this.hopGPTStopSequence.length > 0
+          ? this.hopGPTStopSequence
+          : this._detectStopSequence();
+        return { stopReason: 'stop_sequence', stopSequence: sequence || null };
+      }
+      return { stopReason: mappedReason, stopSequence: null };
+    }
+
+    const detectedSequence = this._detectStopSequence();
+    if (detectedSequence) {
+      return { stopReason: 'stop_sequence', stopSequence: detectedSequence };
+    }
+
+    if (this.maxTokens !== null && this.outputTokens >= this.maxTokens) {
+      return { stopReason: 'max_tokens', stopSequence: null };
+    }
+
+    return { stopReason: 'end_turn', stopSequence: null };
+  }
+
   _createMessageStart() {
     if (this.hasStarted) {
       return null;
@@ -480,8 +589,7 @@ export class HopGPTToAnthropicTransformer {
       events.push(this._createBlockStop());
     }
 
-    // Determine stop reason - 'tool_use' if we have tool calls, otherwise 'end_turn'
-    const stopReason = this.hasToolUse ? 'tool_use' : 'end_turn';
+    const { stopReason, stopSequence } = this._determineStopInfo();
 
     // Add message_delta with stop reason
     events.push({
@@ -490,7 +598,7 @@ export class HopGPTToAnthropicTransformer {
         type: 'message_delta',
         delta: {
           stop_reason: stopReason,
-          stop_sequence: null
+          stop_sequence: stopSequence
         },
         usage: {
           output_tokens: this.outputTokens
@@ -567,8 +675,7 @@ export class HopGPTToAnthropicTransformer {
       }
     }
 
-    // Determine stop reason - 'tool_use' if we have tool calls, otherwise 'end_turn'
-    const stopReason = this.hasToolUse ? 'tool_use' : 'end_turn';
+    const { stopReason, stopSequence } = this._determineStopInfo();
 
     return {
       id: this.messageId,
@@ -577,7 +684,7 @@ export class HopGPTToAnthropicTransformer {
       content,
       model: this.model,
       stop_reason: stopReason,
-      stop_sequence: null,
+      stop_sequence: stopSequence,
       usage: {
         input_tokens: this.inputTokens,
         output_tokens: this.outputTokens
