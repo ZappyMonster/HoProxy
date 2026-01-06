@@ -142,6 +142,59 @@ export function extractThinkingConfig(anthropicRequest) {
   };
 }
 
+function extractTextAndImages(content, imageDetail) {
+  if (typeof content === 'string') {
+    return { text: content, images: [] };
+  }
+
+  if (!Array.isArray(content)) {
+    return { text: '', images: [] };
+  }
+
+  const textParts = [];
+  const images = [];
+
+  for (const block of content) {
+    if (!block) continue;
+    if (block.type === 'text' && typeof block.text === 'string') {
+      textParts.push(block.text);
+      continue;
+    }
+
+    if (block.type === 'tool_use') {
+      textParts.push(formatToolUseBlock(block));
+      continue;
+    }
+
+    if (block.type === 'tool_result') {
+      textParts.push(formatToolResultBlock(block));
+      continue;
+    }
+
+    if (block.type === 'image' && block.source) {
+      if (block.source.type === 'base64' && block.source.data && block.source.media_type) {
+        images.push({
+          type: 'image_url',
+          image_url: {
+            url: `data:${block.source.media_type};base64,${block.source.data}`,
+            detail: imageDetail
+          }
+        });
+      } else if (block.source.type === 'url' && block.source.url) {
+        images.push({
+          type: 'image_url',
+          image_url: {
+            url: block.source.url,
+            detail: imageDetail
+          }
+        });
+      }
+    }
+  }
+
+  return { text: textParts.join('\n'), images };
+}
+
 /**
  * Transform Anthropic Messages API request to HopGPT format
  * @param {object} anthropicRequest - Anthropic API request body
@@ -150,6 +203,7 @@ export function extractThinkingConfig(anthropicRequest) {
  */
 export function transformAnthropicToHopGPT(anthropicRequest, conversationState = null) {
   const { model, messages, system, tools, tool_choice } = anthropicRequest;
+  const imageDetail = 'high';
 
   // Get thinking configuration
   const thinkingConfig = extractThinkingConfig(anthropicRequest);
@@ -158,7 +212,16 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
   const latestMessage = messages[messages.length - 1];
 
   // Build text content - handle all content block types including tool_result
-  let text = extractMessageContent(latestMessage);
+  let text = '';
+  let images = [];
+  if (typeof latestMessage.content === 'string') {
+    text = latestMessage.content;
+  } else if (Array.isArray(latestMessage.content)) {
+    // Extract text from content blocks (skip thinking blocks in user messages)
+    const extracted = extractTextAndImages(latestMessage.content, imageDetail);
+    text = extracted.text;
+    images = extracted.images;
+  }
 
   // For multi-turn conversations with tools, we need to include context
   // about previous tool interactions in the message
@@ -197,7 +260,7 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
 
   // Prepend system message if provided and this is a simple first message
   if (system && messages.length === 1) {
-    text = `${system}\n\n${text}`;
+    text = text ? `${system}\n\n${text}` : system;
   }
 
   // Get parent message ID for conversation threading
@@ -220,7 +283,7 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
     endpointType: 'custom',
     model: model || 'claude-sonnet-4-20250514',
     resendFiles: false,
-    imageDetail: 'high',
+    imageDetail,
     key: 'never',
     modelDisplayLabel: 'Claude',
     isTemporary: false,
@@ -234,6 +297,10 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
       mcp: []
     }
   };
+
+  if (images.length > 0) {
+    hopGPTRequest.image_urls = images;
+  }
 
   // Add tools if provided
   const transformedTools = transformTools(tools);
