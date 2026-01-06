@@ -5,7 +5,7 @@ import messagesRouter from './routes/messages.js';
 import modelsRouter from './routes/models.js';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));

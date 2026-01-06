@@ -88,7 +88,7 @@ Create or edit `~/.claude/settings.json`:
 {
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "test",
-    "ANTHROPIC_BASE_URL": "http://localhost:3000",
+    "ANTHROPIC_BASE_URL": "http://localhost:3001",
     "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
   }
 }
@@ -101,13 +101,13 @@ Restart Claude Code after editing. HoProxy does not validate the auth token, but
 If you prefer shell environment variables instead of `settings.json`:
 ```bash
 export ANTHROPIC_AUTH_TOKEN=test
-export ANTHROPIC_BASE_URL=http://localhost:3000
+export ANTHROPIC_BASE_URL=http://localhost:3001
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 ```
 
 ### 5) Troubleshooting common issues
 
-- **Connection refused**: Ensure HoProxy is running and listening on `http://localhost:3000`.
+- **Connection refused**: Ensure HoProxy is running and listening on `http://localhost:3001`.
 - **`authentication_error` from HoProxy**: Your HopGPT cookies/tokens are missing or expired. Re-run `npm run extract` and restart the server.
 - **401/403 from HopGPT**: The refresh token likely expired; re-authenticate and re-extract credentials.
 - **Model warning or not found**: Use a supported model from the list below or update `ANTHROPIC_MODEL`.
@@ -132,7 +132,7 @@ Aliases accepted by the proxy include:
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://localhost:3000",
+    base_url="http://localhost:3001",
     api_key="dummy"  # Not used, but required by SDK
 )
 
@@ -150,7 +150,7 @@ print(response.content[0].text)
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({
-  baseURL: 'http://localhost:3000',
+  baseURL: 'http://localhost:3001',
   apiKey: 'dummy'
 });
 
@@ -165,7 +165,7 @@ console.log(response.content[0].text);
 ### With curl
 
 ```bash
-curl http://localhost:3000/v1/messages \
+curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4.5",
@@ -177,7 +177,7 @@ curl http://localhost:3000/v1/messages \
 ### Streaming
 
 ```bash
-curl http://localhost:3000/v1/messages \
+curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "model": "claude-opus-4.5",
@@ -191,7 +191,7 @@ curl http://localhost:3000/v1/messages \
 
 | Variable | Description |
 |----------|-------------|
-| `PORT` | Server port (default: 3000) |
+| `PORT` | Server port (default: 3001) |
 | `HOPGPT_BEARER_TOKEN` | JWT Bearer token from Authorization header (optional if refresh token is set) |
 | `HOPGPT_COOKIE_CF_CLEARANCE` | Cloudflare clearance cookie |
 | `HOPGPT_COOKIE_CONNECT_SID` | Session ID cookie |
