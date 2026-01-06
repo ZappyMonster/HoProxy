@@ -11,6 +11,21 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
 
 2. **Configure authentication:**
 
+   **Option A: Automatic extraction (recommended)**
+
+   Run the extraction script to automatically open a browser, log in, and extract credentials:
+   ```bash
+   npm run extract
+   ```
+
+   This will:
+   - Open a browser window to the HopGPT login page
+   - Wait for you to complete the login process
+   - Automatically extract all necessary credentials
+   - Save them to a `.env` file
+
+   **Option B: Manual extraction**
+
    Copy the example environment file:
    ```bash
    cp .env.example .env
