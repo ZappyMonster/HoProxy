@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { transformAnthropicToHopGPT } from '../transformers/anthropicToHopGPT.js';
+import { transformAnthropicToHopGPT, extractThinkingConfig } from '../transformers/anthropicToHopGPT.js';
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
 import { pipeSSEStream, parseSSEStream } from '../utils/sseParser.js';
@@ -49,13 +49,16 @@ router.post('/messages', async (req, res) => {
     // Transform request
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest);
 
+    // Extract thinking configuration for response transformer
+    const thinkingConfig = extractThinkingConfig(anthropicRequest);
+
     // Determine if streaming
     const isStreaming = anthropicRequest.stream === true;
 
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, anthropicRequest.model, res);
+      await handleStreamingRequest(client, hopGPTRequest, anthropicRequest.model, thinkingConfig, res);
     } else {
-      await handleNonStreamingRequest(client, hopGPTRequest, anthropicRequest.model, res);
+      await handleNonStreamingRequest(client, hopGPTRequest, anthropicRequest.model, thinkingConfig, res);
     }
   } catch (error) {
     handleError(error, res);
@@ -65,7 +68,7 @@ router.post('/messages', async (req, res) => {
 /**
  * Handle streaming response
  */
-async function handleStreamingRequest(client, hopGPTRequest, model, res) {
+async function handleStreamingRequest(client, hopGPTRequest, model, thinkingConfig, res) {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -75,7 +78,9 @@ async function handleStreamingRequest(client, hopGPTRequest, model, res) {
   // Prevent request timeout
   res.flushHeaders();
 
-  const transformer = new HopGPTToAnthropicTransformer(model);
+  const transformer = new HopGPTToAnthropicTransformer(model, {
+    thinkingEnabled: thinkingConfig.enabled
+  });
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
@@ -105,8 +110,10 @@ async function handleStreamingRequest(client, hopGPTRequest, model, res) {
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingRequest(client, hopGPTRequest, model, res) {
-  const transformer = new HopGPTToAnthropicTransformer(model);
+async function handleNonStreamingRequest(client, hopGPTRequest, model, thinkingConfig, res) {
+  const transformer = new HopGPTToAnthropicTransformer(model, {
+    thinkingEnabled: thinkingConfig.enabled
+  });
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
