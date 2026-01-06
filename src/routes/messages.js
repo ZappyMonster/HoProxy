@@ -52,13 +52,19 @@ router.post('/messages', async (req, res) => {
     // Extract thinking configuration for response transformer
     const thinkingConfig = extractThinkingConfig(anthropicRequest);
 
+    const transformerOptions = {
+      thinkingEnabled: thinkingConfig.enabled,
+      maxTokens: hopGPTRequest.max_tokens,
+      stopSequences: hopGPTRequest.stop_sequences
+    };
+
     // Determine if streaming
     const isStreaming = anthropicRequest.stream === true;
 
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, anthropicRequest.model, thinkingConfig, res);
+      await handleStreamingRequest(client, hopGPTRequest, anthropicRequest.model, transformerOptions, res);
     } else {
-      await handleNonStreamingRequest(client, hopGPTRequest, anthropicRequest.model, thinkingConfig, res);
+      await handleNonStreamingRequest(client, hopGPTRequest, anthropicRequest.model, transformerOptions, res);
     }
   } catch (error) {
     handleError(error, res);
@@ -68,7 +74,7 @@ router.post('/messages', async (req, res) => {
 /**
  * Handle streaming response
  */
-async function handleStreamingRequest(client, hopGPTRequest, model, thinkingConfig, res) {
+async function handleStreamingRequest(client, hopGPTRequest, model, transformerOptions, res) {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -78,9 +84,7 @@ async function handleStreamingRequest(client, hopGPTRequest, model, thinkingConf
   // Prevent request timeout
   res.flushHeaders();
 
-  const transformer = new HopGPTToAnthropicTransformer(model, {
-    thinkingEnabled: thinkingConfig.enabled
-  });
+  const transformer = new HopGPTToAnthropicTransformer(model, transformerOptions);
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
@@ -110,10 +114,8 @@ async function handleStreamingRequest(client, hopGPTRequest, model, thinkingConf
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingRequest(client, hopGPTRequest, model, thinkingConfig, res) {
-  const transformer = new HopGPTToAnthropicTransformer(model, {
-    thinkingEnabled: thinkingConfig.enabled
-  });
+async function handleNonStreamingRequest(client, hopGPTRequest, model, transformerOptions, res) {
+  const transformer = new HopGPTToAnthropicTransformer(model, transformerOptions);
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
