@@ -102,11 +102,12 @@ curl http://localhost:3000/v1/messages \
 | Variable | Description |
 |----------|-------------|
 | `PORT` | Server port (default: 3000) |
-| `HOPGPT_BEARER_TOKEN` | JWT Bearer token from Authorization header |
+| `HOPGPT_BEARER_TOKEN` | JWT Bearer token from Authorization header (optional if refresh token is set) |
 | `HOPGPT_COOKIE_CF_CLEARANCE` | Cloudflare clearance cookie |
 | `HOPGPT_COOKIE_CONNECT_SID` | Session ID cookie |
 | `HOPGPT_COOKIE_CF_BM` | Cloudflare bot management cookie |
-| `HOPGPT_COOKIE_REFRESH_TOKEN` | Refresh token cookie |
+| `HOPGPT_COOKIE_REFRESH_TOKEN` | Refresh token cookie (required for auto-refresh) |
+| `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
 
 ## API Endpoints
 
@@ -117,9 +118,32 @@ curl http://localhost:3000/v1/messages \
 
 ## Authentication Notes
 
-- The Bearer token expires frequently (~15 minutes)
-- You may need to refresh credentials periodically
-- Cloudflare cookies (`cf_clearance`, `__cf_bm`) may also expire
+### Automatic Token Refresh
+
+The proxy now includes **automatic token refresh**. When a request fails with a 401/403 authentication error, the proxy will:
+
+1. Call the HopGPT refresh endpoint (`/api/auth/refresh`)
+2. Obtain a new bearer token using the refresh token cookie
+3. Retry the original request with the new token
+
+This extends the effective session from ~15 minutes (bearer token lifespan) to ~7 days (refresh token lifespan).
+
+### Token Lifespans
+
+| Token | Lifespan | Notes |
+|-------|----------|-------|
+| Bearer Token | ~15 minutes | Automatically refreshed when expired |
+| Refresh Token | ~7 days | Requires manual re-authentication when expired |
+| Cloudflare cookies | Variable | May need to be refreshed if you encounter issues |
+
+### Minimal Configuration
+
+With auto-refresh enabled, you only need to provide the **refresh token**. The bearer token will be obtained automatically on the first request:
+
+```bash
+# Minimal .env configuration
+HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
+```
 
 ## Project Structure
 
