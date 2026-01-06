@@ -2,6 +2,13 @@ import { Router } from 'express';
 import { transformAnthropicToHopGPT, extractThinkingConfig } from '../transformers/anthropicToHopGPT.js';
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
+import {
+  resolveSessionId,
+  shouldResetConversation,
+  getConversationState,
+  updateConversationState,
+  resetConversationState
+} from '../services/conversationStore.js';
 import { pipeSSEStream, parseSSEStream } from '../utils/sseParser.js';
 import { resolveModelMapping } from '../utils/modelMapping.js';
 
@@ -53,8 +60,18 @@ router.post('/messages', async (req, res) => {
       console.warn(`[Model Warning] Unmapped model "${anthropicRequest.model}", using as-is`);
     }
 
+    const { sessionId } = resolveSessionId(req, anthropicRequest);
+    res.setHeader('X-Session-Id', sessionId);
+
+    const resetRequested = shouldResetConversation(req, anthropicRequest);
+    if (resetRequested) {
+      resetConversationState(sessionId);
+    }
+
+    const conversationState = resetRequested ? null : getConversationState(sessionId);
+
     // Transform request
-    const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest);
+    const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest, conversationState);
     hopGPTRequest.model = modelMapping.hopgptModel || hopGPTRequest.model;
 
     // Extract thinking configuration for response transformer
@@ -71,10 +88,17 @@ router.post('/messages', async (req, res) => {
 
     const responseModel = modelMapping.responseModel || anthropicRequest.model;
 
+    const transformer = new HopGPTToAnthropicTransformer(responseModel, transformerOptions);
+
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, responseModel, transformerOptions, res);
+      await handleStreamingRequest(client, hopGPTRequest, transformer, res);
     } else {
-      await handleNonStreamingRequest(client, hopGPTRequest, responseModel, transformerOptions, res);
+      await handleNonStreamingRequest(client, hopGPTRequest, transformer, res);
+    }
+
+    const nextState = transformer.getConversationState();
+    if (nextState?.lastAssistantMessageId || nextState?.conversationId) {
+      updateConversationState(sessionId, nextState);
     }
   } catch (error) {
     handleError(error, res);
@@ -84,7 +108,7 @@ router.post('/messages', async (req, res) => {
 /**
  * Handle streaming response
  */
-async function handleStreamingRequest(client, hopGPTRequest, model, transformerOptions, res) {
+async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -93,8 +117,6 @@ async function handleStreamingRequest(client, hopGPTRequest, model, transformerO
 
   // Prevent request timeout
   res.flushHeaders();
-
-  const transformer = new HopGPTToAnthropicTransformer(model, transformerOptions);
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
@@ -124,9 +146,7 @@ async function handleStreamingRequest(client, hopGPTRequest, model, transformerO
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingRequest(client, hopGPTRequest, model, transformerOptions, res) {
-  const transformer = new HopGPTToAnthropicTransformer(model, transformerOptions);
-
+async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res) {
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest);
 

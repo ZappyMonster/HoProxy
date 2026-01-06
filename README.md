@@ -123,6 +123,7 @@ curl http://localhost:3000/v1/messages \
 | `HOPGPT_COOKIE_CF_BM` | Cloudflare bot management cookie |
 | `HOPGPT_COOKIE_REFRESH_TOKEN` | Refresh token cookie (required for auto-refresh) |
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
+| `CONVERSATION_TTL_MS` | In-memory conversation state TTL in milliseconds (default: 21600000) |
 
 ## API Endpoints
 
@@ -130,6 +131,16 @@ curl http://localhost:3000/v1/messages \
 |----------|--------|-------------|
 | `/v1/messages` | POST | Anthropic Messages API |
 | `/health` | GET | Health check |
+
+## Conversation State
+
+The proxy tracks HopGPT conversation threading in-memory so multi-turn requests can reuse context and cache keys.
+
+- Provide a stable session key via `X-Session-Id` or `metadata.session_id` / `metadata.conversation_id`.
+- If missing, the proxy generates a session ID and returns it in the `X-Session-Id` response header.
+- Reset the session with `X-Conversation-Reset: true` or `metadata.conversation_reset: true`.
+
+Conversation state is stored in-memory and expires after `CONVERSATION_TTL_MS` (default 6 hours).
 
 ## Authentication Notes
 
