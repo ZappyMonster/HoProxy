@@ -4,6 +4,16 @@
   "description": "Anthropic-compatible API proxy for HopGPT",
   "type": "module",
   "main": "src/index.js",
+  "bin": {
+    "hopgpt-anthropic-proxy": "src/index.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
