@@ -62,6 +62,7 @@ export async function extractCredentials(options = {}) {
   // Store captured credentials
   const credentials = {
     bearerToken: null,
+    userAgent: null,
     cookies: {
       cf_clearance: null,
       connect_sid: null,
@@ -70,6 +71,12 @@ export async function extractCredentials(options = {}) {
       token_provider: null
     }
   };
+
+  try {
+    credentials.userAgent = await browser.userAgent();
+  } catch (error) {
+    console.warn('Unable to capture browser user agent:', error.message);
+  }
 
   // Set up request interception to capture the bearer token
   await page.setRequestInterception(true);
@@ -193,6 +200,7 @@ export async function extractCredentials(options = {}) {
   console.log(`  - CF Clearance: ${credentials.cookies.cf_clearance ? 'Yes' : 'No'}`);
   console.log(`  - Connect SID: ${credentials.cookies.connect_sid ? 'Yes' : 'No'}`);
   console.log(`  - CF BM: ${credentials.cookies.__cf_bm ? 'Yes' : 'No'}`);
+  console.log(`  - User Agent: ${credentials.userAgent ? 'Yes' : 'No'}`);
 
   return credentials;
 }
@@ -214,6 +222,10 @@ function generateEnvContent(credentials) {
     lines.push(`HOPGPT_BEARER_TOKEN=${credentials.bearerToken}`);
   } else {
     lines.push('# HOPGPT_BEARER_TOKEN= (will be auto-refreshed using refresh token)');
+  }
+
+  if (credentials.userAgent) {
+    lines.push(`HOPGPT_USER_AGENT="${credentials.userAgent}"`);
   }
 
   if (credentials.cookies.cf_clearance) {
@@ -256,6 +268,7 @@ function writeEnvFile(envPath, newContent) {
     // Preserve non-HopGPT lines
     const hopgptVars = [
       'HOPGPT_BEARER_TOKEN',
+      'HOPGPT_USER_AGENT',
       'HOPGPT_COOKIE_CF_CLEARANCE',
       'HOPGPT_COOKIE_CONNECT_SID',
       'HOPGPT_COOKIE_CF_BM',

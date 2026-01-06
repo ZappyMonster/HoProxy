@@ -7,6 +7,7 @@ export class HopGPTClient {
     this.baseURL = config.baseURL || 'https://chat.ai.jh.edu';
     this.endpoint = config.endpoint || '/api/agents/chat/AnthropicClaude';
     this.bearerToken = config.bearerToken || process.env.HOPGPT_BEARER_TOKEN;
+    this.userAgent = config.userAgent || process.env.HOPGPT_USER_AGENT;
     this.cookies = {
       cf_clearance: config.cfClearance || process.env.HOPGPT_COOKIE_CF_CLEARANCE,
       connect_sid: config.connectSid || process.env.HOPGPT_COOKIE_CONNECT_SID,
@@ -97,6 +98,10 @@ export class HopGPTClient {
         'Referer': `${this.baseURL}/`
       };
 
+      if (this.userAgent) {
+        headers['User-Agent'] = this.userAgent;
+      }
+
       const cookieHeader = this.buildCookieHeader();
       if (cookieHeader) {
         headers['Cookie'] = cookieHeader;
@@ -150,6 +155,10 @@ export class HopGPTClient {
       'Referer': `${this.baseURL}/c/new`
     };
 
+    if (this.userAgent) {
+      headers['User-Agent'] = this.userAgent;
+    }
+
     // Add Bearer token if configured
     if (this.bearerToken) {
       headers['Authorization'] = `Bearer ${this.bearerToken}`;
@@ -201,6 +210,18 @@ export class HopGPTClient {
     // Refresh token is required for auto-refresh to work
     if (!this.cookies.refreshToken) {
       missing.push('HOPGPT_COOKIE_REFRESH_TOKEN');
+    }
+
+    if (!this.cookies.cf_clearance) {
+      warnings.push('HOPGPT_COOKIE_CF_CLEARANCE not set; Cloudflare may block requests');
+    }
+
+    if (!this.cookies.__cf_bm) {
+      warnings.push('HOPGPT_COOKIE_CF_BM not set; Cloudflare may block requests');
+    }
+
+    if (!this.userAgent) {
+      warnings.push('HOPGPT_USER_AGENT not set; Cloudflare may require a browser user agent');
     }
 
     // Bearer token is optional if refresh token is available (we can refresh it)

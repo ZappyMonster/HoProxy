@@ -37,6 +37,7 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
    - Send a message and find the request to `/api/agents/chat/AnthropicClaude`
    - Copy the values from:
      - `Authorization` header → `HOPGPT_BEARER_TOKEN`
+     - `User-Agent` header → `HOPGPT_USER_AGENT`
      - `Cookie` header → extract individual cookie values
 
 3. **Start the server:**
@@ -110,6 +111,7 @@ export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 - **Connection refused**: Ensure HoProxy is running and listening on `http://localhost:3001`.
 - **`authentication_error` from HoProxy**: Your HopGPT cookies/tokens are missing or expired. Re-run `npm run extract` and restart the server.
 - **401/403 from HopGPT**: The refresh token likely expired; re-authenticate and re-extract credentials.
+- **Cloudflare "Attention Required" page**: Your Cloudflare cookies or user agent are missing/expired. Re-run `npm run extract` and restart the server.
 - **Model warning or not found**: Use a supported model from the list below or update `ANTHROPIC_MODEL`.
 - **Claude Code still calling Anthropic**: Confirm `ANTHROPIC_BASE_URL` is set and restart Claude Code.
 
@@ -193,6 +195,7 @@ curl http://localhost:3001/v1/messages \
 |----------|-------------|
 | `PORT` | Server port (default: 3001) |
 | `HOPGPT_BEARER_TOKEN` | JWT Bearer token from Authorization header (optional if refresh token is set) |
+| `HOPGPT_USER_AGENT` | Browser User-Agent header (recommended to satisfy Cloudflare) |
 | `HOPGPT_COOKIE_CF_CLEARANCE` | Cloudflare clearance cookie |
 | `HOPGPT_COOKIE_CONNECT_SID` | Session ID cookie |
 | `HOPGPT_COOKIE_CF_BM` | Cloudflare bot management cookie |
