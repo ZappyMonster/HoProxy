@@ -1,0 +1,46 @@
+{
+  "model": "claude-sonnet-4-5-thinking",
+  "system": "You are a helpful assistant.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello"
+    },
+    {
+      "role": "assistant",
+      "content": "Hi there."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Check this"
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAUA"
+          }
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "url",
+            "url": "https://example.com/cat.png"
+          }
+        }
+      ]
+    }
+  ],
+  "max_tokens": 128,
+  "stop_sequences": [
+    "\n\nHuman:"
+  ],
+  "stream": false,
+  "metadata": {
+    "session_id": "sess-123"
+  }
+}

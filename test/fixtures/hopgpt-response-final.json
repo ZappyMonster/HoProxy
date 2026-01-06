@@ -1,0 +1,31 @@
+{
+  "final": true,
+  "conversation": {
+    "conversationId": "conv-1"
+  },
+  "responseMessage": {
+    "messageId": "msg-abc",
+    "promptTokens": 10,
+    "tokenCount": 5,
+    "stopReason": "stop_sequence",
+    "stopSequence": "END",
+    "thoughtSignature": "sig-final",
+    "content": [
+      {
+        "type": "thinking",
+        "thinking": "Working through it",
+        "signature": "sig-1"
+      },
+      {
+        "type": "text",
+        "text": "Hello"
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_final",
+        "name": "get_weather",
+        "input": "{\"city\":\"LA\"}"
+      }
+    ]
+  }
+}

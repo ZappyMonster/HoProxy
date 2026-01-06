@@ -1,0 +1,51 @@
+{
+  "model": "claude-opus-4-5-thinking",
+  "system": [
+    {
+      "type": "text",
+      "text": "System prompt"
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Use tool"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01TEST",
+          "name": "get_weather",
+          "input": {
+            "city": "LA"
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get weather",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "tool_choice": {
+    "type": "tool",
+    "name": "get_weather"
+  },
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 256
+  },
+  "stream": true
+}
