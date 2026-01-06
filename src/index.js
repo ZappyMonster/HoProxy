@@ -3,6 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import messagesRouter from './routes/messages.js';
 import modelsRouter from './routes/models.js';
+import refreshTokenRouter from './routes/refreshToken.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -41,6 +42,7 @@ app.get('/health', (req, res) => {
 // Mount Anthropic-compatible API routes
 app.use('/v1', messagesRouter);
 app.use('/v1', modelsRouter);
+app.use(refreshTokenRouter);
 
 // 404 handler
 app.use((req, res) => {
@@ -76,6 +78,7 @@ app.listen(PORT, () => {
 ║  Endpoints:                                                ║
 ║    POST /v1/messages  - Anthropic Messages API             ║
 ║    GET  /v1/models    - List available models              ║
+║    POST /refresh-token - Refresh HopGPT session token      ║
 ║    GET  /health       - Health check                       ║
 ║                                                            ║
 ║  Usage with Anthropic SDK:                                 ║
