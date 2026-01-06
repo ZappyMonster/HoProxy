@@ -2,6 +2,124 @@ import { v4 as uuidv4 } from 'uuid';
 import { isThinkingModel } from './hopGPTToAnthropic.js';
 
 /**
+ * Transform Anthropic tool definitions to HopGPT format
+ * @param {Array} tools - Anthropic tools array
+ * @returns {Array} HopGPT tools array
+ */
+export function transformTools(tools) {
+  if (!tools || !Array.isArray(tools)) {
+    return null;
+  }
+
+  return tools.map(tool => ({
+    name: tool.name,
+    description: tool.description || '',
+    parameters: tool.input_schema || { type: 'object', properties: {} }
+  }));
+}
+
+/**
+ * Transform Anthropic tool_choice to HopGPT format
+ * @param {object|string} toolChoice - Anthropic tool_choice
+ * @returns {object|null} HopGPT tool choice config
+ */
+export function transformToolChoice(toolChoice) {
+  if (!toolChoice) {
+    return null;
+  }
+
+  // Handle string shortcuts
+  if (typeof toolChoice === 'string') {
+    if (toolChoice === 'auto') {
+      return { type: 'auto' };
+    }
+    if (toolChoice === 'any') {
+      return { type: 'required' };
+    }
+    if (toolChoice === 'none') {
+      return { type: 'none' };
+    }
+  }
+
+  // Handle object format
+  if (typeof toolChoice === 'object') {
+    if (toolChoice.type === 'auto') {
+      return { type: 'auto' };
+    }
+    if (toolChoice.type === 'any') {
+      return { type: 'required' };
+    }
+    if (toolChoice.type === 'tool') {
+      return { type: 'function', function: { name: toolChoice.name } };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Format a tool_use block for conversation context
+ * @param {object} block - tool_use content block
+ * @returns {string} Formatted string representation
+ */
+function formatToolUseBlock(block) {
+  const inputStr = typeof block.input === 'string'
+    ? block.input
+    : JSON.stringify(block.input, null, 2);
+  return `<tool_use id="${block.id}" name="${block.name}">\n${inputStr}\n</tool_use>`;
+}
+
+/**
+ * Format a tool_result block for conversation context
+ * @param {object} block - tool_result content block
+ * @returns {string} Formatted string representation
+ */
+function formatToolResultBlock(block) {
+  let content = '';
+  if (typeof block.content === 'string') {
+    content = block.content;
+  } else if (Array.isArray(block.content)) {
+    // Handle array content (e.g., with text blocks)
+    content = block.content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
+  }
+
+  const errorAttr = block.is_error ? ' is_error="true"' : '';
+  return `<tool_result tool_use_id="${block.tool_use_id}"${errorAttr}>\n${content}\n</tool_result>`;
+}
+
+/**
+ * Extract content from a message, handling all content block types
+ * @param {object} message - Anthropic message
+ * @returns {string} Extracted text content
+ */
+function extractMessageContent(message) {
+  if (typeof message.content === 'string') {
+    return message.content;
+  }
+
+  if (!Array.isArray(message.content)) {
+    return '';
+  }
+
+  const parts = [];
+  for (const block of message.content) {
+    if (block.type === 'text') {
+      parts.push(block.text);
+    } else if (block.type === 'tool_use') {
+      parts.push(formatToolUseBlock(block));
+    } else if (block.type === 'tool_result') {
+      parts.push(formatToolResultBlock(block));
+    }
+    // Skip thinking blocks - they are internal model reasoning
+  }
+
+  return parts.join('\n\n');
+}
+
+/**
  * Extract thinking configuration from Anthropic request
  * @param {object} anthropicRequest - Anthropic API request body
  * @returns {object} Thinking configuration {enabled, budgetTokens}
@@ -31,7 +149,7 @@ export function extractThinkingConfig(anthropicRequest) {
  * @returns {object} HopGPT request body
  */
 export function transformAnthropicToHopGPT(anthropicRequest, conversationState = null) {
-  const { model, messages, system } = anthropicRequest;
+  const { model, messages, system, tools, tool_choice } = anthropicRequest;
 
   // Get thinking configuration
   const thinkingConfig = extractThinkingConfig(anthropicRequest);
@@ -39,19 +157,45 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
   // Get the latest user message
   const latestMessage = messages[messages.length - 1];
 
-  // Build text content - handle both string and array content formats
-  let text = '';
-  if (typeof latestMessage.content === 'string') {
-    text = latestMessage.content;
-  } else if (Array.isArray(latestMessage.content)) {
-    // Extract text from content blocks (skip thinking blocks in user messages)
-    text = latestMessage.content
-      .filter(block => block.type === 'text')
-      .map(block => block.text)
-      .join('\n');
+  // Build text content - handle all content block types including tool_result
+  let text = extractMessageContent(latestMessage);
+
+  // For multi-turn conversations with tools, we need to include context
+  // about previous tool interactions in the message
+  if (messages.length > 1) {
+    // Check if any previous messages contain tool_use or tool_result
+    const hasToolContext = messages.some(msg =>
+      Array.isArray(msg.content) &&
+      msg.content.some(block =>
+        block.type === 'tool_use' || block.type === 'tool_result'
+      )
+    );
+
+    // If we have tool context, include the relevant history
+    if (hasToolContext && !conversationState?.lastAssistantMessageId) {
+      // This is a new conversation with tool history - include it in text
+      const contextParts = [];
+
+      if (system) {
+        contextParts.push(`System: ${system}`);
+      }
+
+      for (let i = 0; i < messages.length - 1; i++) {
+        const msg = messages[i];
+        const role = msg.role === 'user' ? 'Human' : 'Assistant';
+        const content = extractMessageContent(msg);
+        if (content) {
+          contextParts.push(`${role}: ${content}`);
+        }
+      }
+
+      if (contextParts.length > 0) {
+        text = contextParts.join('\n\n') + '\n\nHuman: ' + text;
+      }
+    }
   }
 
-  // Prepend system message if provided and this is the first message
+  // Prepend system message if provided and this is a simple first message
   if (system && messages.length === 1) {
     text = `${system}\n\n${text}`;
   }
@@ -91,6 +235,18 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
     }
   };
 
+  // Add tools if provided
+  const transformedTools = transformTools(tools);
+  if (transformedTools) {
+    hopGPTRequest.tools = transformedTools;
+  }
+
+  // Add tool_choice if provided
+  const transformedToolChoice = transformToolChoice(tool_choice);
+  if (transformedToolChoice) {
+    hopGPTRequest.tool_choice = transformedToolChoice;
+  }
+
   // Add reasoning/thinking parameters based on thinking config
   if (thinkingConfig.enabled) {
     hopGPTRequest.reasoning_effort = 'high';
@@ -117,19 +273,7 @@ export function buildConversationText(messages, system = null) {
 
   for (const msg of messages) {
     const role = msg.role === 'user' ? 'Human' : 'Assistant';
-    let content;
-
-    if (typeof msg.content === 'string') {
-      content = msg.content;
-    } else if (Array.isArray(msg.content)) {
-      // Filter out thinking blocks - only include text content
-      content = msg.content
-        .filter(b => b.type === 'text')
-        .map(b => b.text)
-        .join('\n');
-    } else {
-      content = '';
-    }
+    const content = extractMessageContent(msg);
 
     if (content) {
       parts.push(`${role}: ${content}`);
