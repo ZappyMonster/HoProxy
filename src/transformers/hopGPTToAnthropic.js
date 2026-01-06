@@ -17,8 +17,21 @@ export function isThinkingModel(model) {
 }
 
 /**
+ * Generate a unique tool use ID in Anthropic format
+ * @returns {string} Tool use ID like toolu_01XFDUDYJgAACzvnptvVoYEL
+ */
+function generateToolUseId() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = 'toolu_01';
+  for (let i = 0; i < 22; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
  * Transformer class to convert HopGPT SSE events to Anthropic SSE format
- * Supports extended thinking for compatible models
+ * Supports extended thinking and tool use for compatible models
  */
 export class HopGPTToAnthropicTransformer {
   constructor(model = 'claude-sonnet-4-20250514', options = {}) {
@@ -33,7 +46,7 @@ export class HopGPTToAnthropicTransformer {
     // Thinking support
     this.thinkingEnabled = options.thinkingEnabled ?? isThinkingModel(model);
     this.currentBlockIndex = -1;  // Will be incremented when blocks start
-    this.currentBlockType = null; // 'thinking' or 'text'
+    this.currentBlockType = null; // 'thinking', 'text', or 'tool_use'
     this.blockStarted = false;    // Track if current block has started
 
     // Accumulated content for non-streaming responses
@@ -41,6 +54,11 @@ export class HopGPTToAnthropicTransformer {
     this.accumulatedText = '';    // For backward compatibility
     this.accumulatedThinking = '';
     this.thinkingSignature = null;
+
+    // Tool use support
+    this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
+    this.accumulatedToolUses = []; // All completed tool uses
+    this.hasToolUse = false;      // Track if response contains tool use
   }
 
   /**
@@ -159,8 +177,8 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle text blocks
     if (block.type === 'text' && block.text) {
-      // If we were in a thinking block, close it first
-      if (this.blockStarted && this.currentBlockType === 'thinking') {
+      // If we were in a different block type, close it first
+      if (this.blockStarted && this.currentBlockType !== 'text') {
         events.push(this._createBlockStop());
       }
 
@@ -187,6 +205,88 @@ export class HopGPTToAnthropicTransformer {
       return events;
     }
 
+    // Handle tool_use blocks
+    if (block.type === 'tool_use') {
+      this.hasToolUse = true;
+
+      // Check if this is a new tool call or continuation of existing
+      const toolId = block.id || (this.currentToolUse?.id);
+      const toolName = block.name || (this.currentToolUse?.name);
+
+      // If we were in a different block type or different tool, close it first
+      if (this.blockStarted && (this.currentBlockType !== 'tool_use' ||
+          (this.currentToolUse && this.currentToolUse.id !== toolId))) {
+        // Save the completed tool use before closing
+        if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
+          this.accumulatedToolUses.push({...this.currentToolUse});
+        }
+        events.push(this._createBlockStop());
+      }
+
+      // Start new tool_use block if needed
+      if (!this.blockStarted || this.currentBlockType !== 'tool_use' ||
+          (this.currentToolUse && this.currentToolUse.id !== toolId)) {
+        // Initialize new tool use
+        this.currentToolUse = {
+          id: toolId || generateToolUseId(),
+          name: toolName || '',
+          inputJson: ''
+        };
+        const startEvent = this._createBlockStart('tool_use', this.currentToolUse);
+        if (startEvent) events.push(startEvent);
+      }
+
+      // Update tool name if provided
+      if (block.name && !this.currentToolUse.name) {
+        this.currentToolUse.name = block.name;
+      }
+
+      // Handle input JSON delta
+      if (block.input !== undefined) {
+        let inputDelta = '';
+        if (typeof block.input === 'string') {
+          inputDelta = block.input;
+          this.currentToolUse.inputJson += inputDelta;
+        } else if (typeof block.input === 'object') {
+          // Full input object - stringify and set (not accumulate)
+          inputDelta = JSON.stringify(block.input);
+          this.currentToolUse.inputJson = inputDelta;
+        }
+
+        if (inputDelta) {
+          events.push({
+            event: 'content_block_delta',
+            data: {
+              type: 'content_block_delta',
+              index: this.currentBlockIndex,
+              delta: {
+                type: 'input_json_delta',
+                partial_json: inputDelta
+              }
+            }
+          });
+        }
+      }
+
+      // Handle partial JSON chunks (input_json field for streaming)
+      if (block.input_json !== undefined) {
+        this.currentToolUse.inputJson += block.input_json;
+        events.push({
+          event: 'content_block_delta',
+          data: {
+            type: 'content_block_delta',
+            index: this.currentBlockIndex,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: block.input_json
+            }
+          }
+        });
+      }
+
+      return events;
+    }
+
     return null;
   }
 
@@ -205,6 +305,25 @@ export class HopGPTToAnthropicTransformer {
         this.contentBlocks.push({
           type: 'text',
           text: block.text || ''
+        });
+      } else if (block.type === 'tool_use') {
+        this.hasToolUse = true;
+        let input = block.input;
+
+        // Parse input if it's a string
+        if (typeof input === 'string') {
+          try {
+            input = JSON.parse(input);
+          } catch (e) {
+            input = {};
+          }
+        }
+
+        this.contentBlocks.push({
+          type: 'tool_use',
+          id: block.id || generateToolUseId(),
+          name: block.name || '',
+          input: input || {}
         });
       }
     }
@@ -243,7 +362,7 @@ export class HopGPTToAnthropicTransformer {
   /**
    * Create a content block start event
    */
-  _createBlockStart(blockType) {
+  _createBlockStart(blockType, toolUseInfo = null) {
     this.currentBlockIndex++;
     this.currentBlockType = blockType;
     this.blockStarted = true;
@@ -264,6 +383,20 @@ export class HopGPTToAnthropicTransformer {
           content_block: {
             type: 'thinking',
             thinking: ''
+          }
+        }
+      });
+    } else if (blockType === 'tool_use') {
+      events.push({
+        event: 'content_block_start',
+        data: {
+          type: 'content_block_start',
+          index: this.currentBlockIndex,
+          content_block: {
+            type: 'tool_use',
+            id: toolUseInfo?.id || generateToolUseId(),
+            name: toolUseInfo?.name || '',
+            input: {}
           }
         }
       });
@@ -337,10 +470,18 @@ export class HopGPTToAnthropicTransformer {
   _createMessageStop() {
     const events = [];
 
+    // Save current tool use if still in progress
+    if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
+      this.accumulatedToolUses.push({...this.currentToolUse});
+    }
+
     // Close any open content block
     if (this.blockStarted) {
       events.push(this._createBlockStop());
     }
+
+    // Determine stop reason - 'tool_use' if we have tool calls, otherwise 'end_turn'
+    const stopReason = this.hasToolUse ? 'tool_use' : 'end_turn';
 
     // Add message_delta with stop reason
     events.push({
@@ -348,7 +489,7 @@ export class HopGPTToAnthropicTransformer {
       data: {
         type: 'message_delta',
         delta: {
-          stop_reason: 'end_turn',
+          stop_reason: stopReason,
           stop_sequence: null
         },
         usage: {
@@ -399,6 +540,24 @@ export class HopGPTToAnthropicTransformer {
         });
       }
 
+      // Add accumulated tool uses
+      for (const toolUse of this.accumulatedToolUses) {
+        let input = {};
+        if (toolUse.inputJson) {
+          try {
+            input = JSON.parse(toolUse.inputJson);
+          } catch (e) {
+            // If parsing fails, keep empty object
+          }
+        }
+        content.push({
+          type: 'tool_use',
+          id: toolUse.id,
+          name: toolUse.name,
+          input
+        });
+      }
+
       // If no content at all, add empty text block
       if (content.length === 0) {
         content.push({
@@ -408,13 +567,16 @@ export class HopGPTToAnthropicTransformer {
       }
     }
 
+    // Determine stop reason - 'tool_use' if we have tool calls, otherwise 'end_turn'
+    const stopReason = this.hasToolUse ? 'tool_use' : 'end_turn';
+
     return {
       id: this.messageId,
       type: 'message',
       role: 'assistant',
       content,
       model: this.model,
-      stop_reason: 'end_turn',
+      stop_reason: stopReason,
       stop_sequence: null,
       usage: {
         input_tokens: this.inputTokens,
