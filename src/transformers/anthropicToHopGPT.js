@@ -119,6 +119,29 @@ function extractMessageContent(message) {
   return parts.join('\n\n');
 }
 
+export function normalizeSystemPrompt(system) {
+  if (!system) {
+    return null;
+  }
+
+  if (typeof system === 'string') {
+    return system.trim().length > 0 ? system : null;
+  }
+
+  if (Array.isArray(system)) {
+    const parts = [];
+    for (const block of system) {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        parts.push(block.text);
+      }
+    }
+    const combined = parts.join('\n');
+    return combined.trim().length > 0 ? combined : null;
+  }
+
+  return null;
+}
+
 function normalizeMaxTokens(value) {
   if (!Number.isFinite(value)) {
     return null;
@@ -225,6 +248,11 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
 
   // Get thinking configuration
   const thinkingConfig = extractThinkingConfig(anthropicRequest);
+  const normalizedSystem = normalizeSystemPrompt(system);
+  const stateSystem = normalizeSystemPrompt(conversationState?.systemPrompt ?? conversationState?.system);
+  const systemText = normalizedSystem ?? stateSystem;
+  const systemChanged = normalizedSystem && stateSystem && normalizedSystem !== stateSystem;
+  const isNewConversation = !conversationState?.lastAssistantMessageId;
 
   // Get the latest user message
   const latestMessage = messages[messages.length - 1];
@@ -241,44 +269,11 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
     images = extracted.images;
   }
 
-  // For multi-turn conversations with tools, we need to include context
-  // about previous tool interactions in the message
-  if (messages.length > 1) {
-    // Check if any previous messages contain tool_use or tool_result
-    const hasToolContext = messages.some(msg =>
-      Array.isArray(msg.content) &&
-      msg.content.some(block =>
-        block.type === 'tool_use' || block.type === 'tool_result'
-      )
-    );
-
-    // If we have tool context, include the relevant history
-    if (hasToolContext && !conversationState?.lastAssistantMessageId) {
-      // This is a new conversation with tool history - include it in text
-      const contextParts = [];
-
-      if (system) {
-        contextParts.push(`System: ${system}`);
-      }
-
-      for (let i = 0; i < messages.length - 1; i++) {
-        const msg = messages[i];
-        const role = msg.role === 'user' ? 'Human' : 'Assistant';
-        const content = extractMessageContent(msg);
-        if (content) {
-          contextParts.push(`${role}: ${content}`);
-        }
-      }
-
-      if (contextParts.length > 0) {
-        text = contextParts.join('\n\n') + '\n\nHuman: ' + text;
-      }
-    }
-  }
-
-  // Prepend system message if provided and this is a simple first message
-  if (system && messages.length === 1) {
-    text = text ? `${system}\n\n${text}` : system;
+  const shouldIncludeHistory = isNewConversation && messages.length > 1;
+  if (shouldIncludeHistory) {
+    text = buildConversationText(messages, systemText);
+  } else if (systemText && (isNewConversation || systemChanged || !stateSystem)) {
+    text = text ? `${systemText}\n\n${text}` : systemText;
   }
 
   // Get parent message ID for conversation threading
@@ -360,9 +355,10 @@ export function transformAnthropicToHopGPT(anthropicRequest, conversationState =
  */
 export function buildConversationText(messages, system = null) {
   let parts = [];
+  const systemText = normalizeSystemPrompt(system);
 
-  if (system) {
-    parts.push(`System: ${system}`);
+  if (systemText) {
+    parts.push(`System: ${systemText}`);
   }
 
   for (const msg of messages) {
