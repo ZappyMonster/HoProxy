@@ -40,6 +40,13 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
      - `Cookie` header → extract individual cookie values
 
 3. **Start the server:**
+
+   With npx (no install, uses `.env` in the current directory):
+   ```bash
+   npx hopgpt-anthropic-proxy start
+   ```
+
+   With a local install:
    ```bash
    npm start
    ```
