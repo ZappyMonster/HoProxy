@@ -1,6 +1,9 @@
+import { tlsFetch } from './tlsClient.js';
+
 /**
  * HopGPT API Client
  * Handles authentication and communication with the HopGPT backend
+ * Uses node-tls-client to bypass Cloudflare TLS fingerprinting
  */
 export class HopGPTClient {
   constructor(config = {}) {
@@ -93,11 +96,31 @@ export class HopGPTClient {
 
   /**
    * Parse Set-Cookie headers and update internal cookie state
-   * @param {Headers} headers - Response headers
+   * @param {Headers} headers - Response headers (native fetch Headers object)
    */
   updateCookiesFromResponse(headers) {
     const setCookieHeaders = headers.getSetCookie?.() || [];
+    this._parseCookies(setCookieHeaders);
+  }
 
+  /**
+   * Parse Set-Cookie headers from TLS client response
+   * @param {object} headers - Response headers object from TLS client
+   */
+  updateCookiesFromTLSResponse(headers) {
+    // TLS client returns headers as an object, Set-Cookie may be a string or array
+    let setCookieHeaders = headers['set-cookie'] || headers['Set-Cookie'] || [];
+    if (typeof setCookieHeaders === 'string') {
+      setCookieHeaders = [setCookieHeaders];
+    }
+    this._parseCookies(setCookieHeaders);
+  }
+
+  /**
+   * Parse cookie strings and update internal state
+   * @param {string[]} setCookieHeaders - Array of Set-Cookie header values
+   */
+  _parseCookies(setCookieHeaders) {
     for (const cookieStr of setCookieHeaders) {
       const [cookiePart] = cookieStr.split(';');
       const [name, value] = cookiePart.split('=');
@@ -137,6 +160,9 @@ export class HopGPTClient {
     try {
       const url = `${this.baseURL}/api/auth/refresh`;
 
+      // Detect browser type from User-Agent
+      const browserType = this.userAgent?.toLowerCase().includes('firefox') ? 'firefox' : 'chrome';
+
       // Start with browser-like headers to pass Cloudflare
       // Use the same headers as real browser requests
       const headers = {
@@ -152,14 +178,17 @@ export class HopGPTClient {
         headers['Cookie'] = cookieHeader;
       }
 
-      const response = await fetch(url, {
+      // Use TLS client with browser fingerprint to bypass Cloudflare
+      const response = await tlsFetch({
+        url,
         method: 'POST',
         headers,
-        body: '{}'
+        body: '{}',
+        browserType
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
+        const errorText = response.body;
         console.error(`[HopGPT] Token refresh failed: ${response.status} ${response.statusText}`, errorText);
         return false;
       }
@@ -173,7 +202,7 @@ export class HopGPTClient {
       }
 
       // Update cookies from Set-Cookie headers (includes rotated refresh token)
-      this.updateCookiesFromResponse(response.headers);
+      this.updateCookiesFromTLSResponse(response.headers);
 
       return true;
     } catch (error) {
@@ -188,10 +217,13 @@ export class HopGPTClient {
    * Send a message to HopGPT
    * @param {object} hopGPTRequest - Request body in HopGPT format
    * @param {boolean} isRetry - Whether this is a retry after token refresh
-   * @returns {Response} Fetch response with SSE stream
+   * @returns {Response} Fetch-like response object with body as string (SSE data)
    */
   async sendMessage(hopGPTRequest, isRetry = false) {
     const url = `${this.baseURL}${this.endpoint}`;
+
+    // Detect browser type from User-Agent
+    const browserType = this.userAgent?.toLowerCase().includes('firefox') ? 'firefox' : 'chrome';
 
     // Start with browser-like headers to pass Cloudflare
     // Accept: */* matches real browser behavior for this endpoint (from HAR capture)
@@ -214,10 +246,13 @@ export class HopGPTClient {
       headers['Cookie'] = cookieHeader;
     }
 
-    const response = await fetch(url, {
+    // Use TLS client with browser fingerprint to bypass Cloudflare
+    const response = await tlsFetch({
+      url,
       method: 'POST',
       headers,
-      body: JSON.stringify(hopGPTRequest)
+      body: hopGPTRequest,
+      browserType
     });
 
     if (!response.ok) {
@@ -232,7 +267,7 @@ export class HopGPTClient {
         }
       }
 
-      const errorText = await response.text();
+      const errorText = response.body;
       throw new HopGPTError(
         response.status,
         `HopGPT request failed: ${response.status} ${response.statusText}`,
@@ -240,7 +275,41 @@ export class HopGPTClient {
       );
     }
 
-    return response;
+    // Return a response-like object that the SSE parser can work with
+    // The body is the SSE text, we'll create a readable stream from it
+    return this._createStreamResponse(response);
+  }
+
+  /**
+   * Create a fetch-like Response object from TLS client response
+   * Converts the string body to a ReadableStream for SSE parsing
+   * @param {object} tlsResponse - TLS client response
+   * @returns {object} Fetch-like Response object
+   */
+  _createStreamResponse(tlsResponse) {
+    const body = tlsResponse.body || '';
+
+    // Create a ReadableStream from the string
+    const stream = new ReadableStream({
+      start(controller) {
+        // Encode the string as bytes and enqueue
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(body));
+        controller.close();
+      }
+    });
+
+    return {
+      ok: tlsResponse.ok,
+      status: tlsResponse.status,
+      statusText: tlsResponse.statusText,
+      headers: tlsResponse.headers,
+      body: stream,
+      // Also provide the raw body text for non-streaming use
+      _rawBody: body,
+      text: async () => body,
+      json: async () => JSON.parse(body)
+    };
   }
 
   /**

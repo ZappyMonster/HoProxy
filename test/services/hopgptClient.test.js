@@ -1,33 +1,34 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HopGPTClient, HopGPTError } from '../../src/services/hopgptClient.js';
+import * as tlsClient from '../../src/services/tlsClient.js';
 
-function createMockResponse({
+function createMockTLSResponse({
   ok = true,
   status = 200,
   statusText = 'OK',
-  json = async () => ({}),
-  text = async () => '',
-  headers = { getSetCookie: () => [] }
+  body = '',
+  headers = {}
 } = {}) {
   return {
     ok,
     status,
     statusText,
-    json,
-    text,
-    headers
+    body,
+    headers,
+    text: async () => body,
+    json: async () => JSON.parse(body || '{}')
   };
 }
 
 describe('HopGPTClient', () => {
-  const originalFetch = globalThis.fetch;
+  let tlsFetchSpy;
 
   beforeEach(() => {
-    globalThis.fetch = vi.fn();
+    // Mock tlsFetch instead of global fetch
+    tlsFetchSpy = vi.spyOn(tlsClient, 'tlsFetch');
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
     vi.restoreAllMocks();
   });
 
@@ -39,30 +40,30 @@ describe('HopGPTClient', () => {
   });
 
   it('refreshes tokens and retries on auth errors', async () => {
-    const fetchMock = globalThis.fetch;
-    const requestResponse = createMockResponse({
+    const requestResponse = createMockTLSResponse({
       ok: false,
       status: 401,
       statusText: 'Unauthorized',
-      text: async () => 'unauthorized'
+      body: 'unauthorized'
     });
-    const refreshResponse = createMockResponse({
+    const refreshResponse = createMockTLSResponse({
       ok: true,
       status: 200,
-      json: async () => ({ token: 'new-token' }),
+      body: JSON.stringify({ token: 'new-token' }),
       headers: {
-        getSetCookie: () => ['refreshToken=new-refresh; Path=/;']
+        'set-cookie': ['refreshToken=new-refresh; Path=/;']
       }
     });
-    const retryResponse = createMockResponse({
+    const retryResponse = createMockTLSResponse({
       ok: true,
-      status: 200
+      status: 200,
+      body: 'data: {"type":"text"}\n\n'
     });
 
     let callCount = 0;
-    fetchMock.mockImplementation(async (url) => {
+    tlsFetchSpy.mockImplementation(async (options) => {
       callCount += 1;
-      if (url.endsWith('/api/auth/refresh')) {
+      if (options.url.endsWith('/api/auth/refresh')) {
         return refreshResponse;
       }
       if (callCount === 1) {
@@ -81,7 +82,7 @@ describe('HopGPTClient', () => {
     expect(response.ok).toBe(true);
     expect(client.bearerToken).toBe('new-token');
     expect(client.cookies.refreshToken).toBe('new-refresh');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
   });
 
   it('maps HopGPT errors to Anthropic error formats', () => {
