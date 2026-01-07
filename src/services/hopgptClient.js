@@ -21,31 +21,48 @@ export class HopGPTClient {
 
   /**
    * Build browser-like headers to pass Cloudflare bot detection
+   * Headers are ordered to match real browser request patterns
+   * @param {string} browserType - 'firefox' or 'chrome' to match the browser used for cookie extraction
    * @returns {object} Headers object with browser-like values
    */
-  buildBrowserHeaders() {
-    const headers = {
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache',
-      'Sec-Ch-Ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"macOS"',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-origin',
-      'Connection': 'keep-alive'
-    };
+  buildBrowserHeaders(browserType = 'firefox') {
+    // Detect browser type from User-Agent if available
+    const detectedBrowser = this.userAgent?.toLowerCase().includes('firefox') ? 'firefox' : 'chrome';
+    const browser = browserType || detectedBrowser;
 
-    if (this.userAgent) {
-      headers['User-Agent'] = this.userAgent;
+    if (browser === 'firefox') {
+      // Firefox-specific headers (matching HAR capture exactly)
+      const headers = {
+        'User-Agent': this.userAgent || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:146.0) Gecko/20100101 Firefox/146.0',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive',
+        'Priority': 'u=0',
+        'TE': 'trailers'
+      };
+      return headers;
     } else {
-      // Default to a realistic Chrome user agent if none provided
-      headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
+      // Chrome-specific headers
+      const headers = {
+        'User-Agent': this.userAgent || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br, zstd',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-Ch-Ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"macOS"',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive',
+        'Priority': 'u=4, i'
+      };
+      return headers;
     }
-
-    return headers;
   }
 
   /**
@@ -121,10 +138,11 @@ export class HopGPTClient {
       const url = `${this.baseURL}/api/auth/refresh`;
 
       // Start with browser-like headers to pass Cloudflare
+      // Use the same headers as real browser requests
       const headers = {
         ...this.buildBrowserHeaders(),
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
+        'Accept': '*/*',
         'Origin': this.baseURL,
         'Referer': `${this.baseURL}/`
       };
@@ -176,10 +194,11 @@ export class HopGPTClient {
     const url = `${this.baseURL}${this.endpoint}`;
 
     // Start with browser-like headers to pass Cloudflare
+    // Accept: */* matches real browser behavior for this endpoint (from HAR capture)
     const headers = {
       ...this.buildBrowserHeaders(),
       'Content-Type': 'application/json',
-      'Accept': 'text/event-stream',
+      'Accept': '*/*',
       'Origin': this.baseURL,
       'Referer': `${this.baseURL}/c/new`
     };
