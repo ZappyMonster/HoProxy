@@ -1,6 +1,10 @@
 # HopGPT Anthropic API Proxy
 
-A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (`/v1/messages`) and translates requests to the HopGPT backend.
+A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (notably `/v1/messages`) and translates requests to the HopGPT backend at `https://chat.ai.jh.edu`. Includes browser credential extraction, TLS fingerprinting, conversation state, and automatic token refresh.
+
+## Requirements
+
+- Node.js 18+
 
 ## Setup
 
@@ -13,41 +17,43 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
 
    **Option A: Automatic extraction (recommended)**
 
-   Run the extraction script to automatically open a browser, log in, and extract credentials:
+   Run the extraction script to open a browser, log in, and save credentials to `.env`:
    ```bash
    npm run extract
    ```
 
-   This will:
-   - Open a browser window to the HopGPT login page
-   - Wait for you to complete the login process
-   - Automatically extract all necessary credentials
-   - Save them to a `.env` file
+   Optional flags:
+   ```bash
+   npm run extract -- --timeout 600 --env-path ./custom.env
+   ```
+
+   Optional environment variables for extraction:
+   - `HOPGPT_PUPPETEER_CHANNEL` (default: `chrome`)
+   - `HOPGPT_PUPPETEER_USER_DATA_DIR` (reuse a browser profile)
 
    **Option B: Manual extraction**
 
-   Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
-
-   Edit `.env` and add your HopGPT credentials from your browser session:
-   - Open HopGPT (chat.ai.jh.edu) in your browser
-   - Open Developer Tools (F12) → Network tab
-   - Send a message and find the request to `/api/agents/chat/AnthropicClaude`
-   - Copy the values from:
-     - `Authorization` header → `HOPGPT_BEARER_TOKEN`
+   Create a `.env` file and set values from your browser session:
+   - Open HopGPT (`https://chat.ai.jh.edu`)
+   - DevTools (F12) → Network tab
+   - Send a message and inspect the request to `/api/agents/chat/AnthropicClaude`
+   - Copy values from headers/cookies:
+     - `Authorization` header → `HOPGPT_BEARER_TOKEN` (optional if refresh token is set)
      - `User-Agent` header → `HOPGPT_USER_AGENT`
-     - `Cookie` header → extract individual cookie values
+     - `Cookie` header → individual cookie values
+
+   Example `.env`:
+   ```bash
+   HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
+   HOPGPT_BEARER_TOKEN=eyJhbGciOiJIUzI1NiIs...
+   HOPGPT_USER_AGENT="Mozilla/5.0 ..."
+   HOPGPT_COOKIE_CF_CLEARANCE=...
+   HOPGPT_COOKIE_CONNECT_SID=...
+   HOPGPT_COOKIE_CF_BM=...
+   HOPGPT_COOKIE_TOKEN_PROVIDER=librechat
+   ```
 
 3. **Start the server:**
-
-   From this repo root (no publish required):
-   ```bash
-   npx . start
-   ```
-
-   Or with a local install:
    ```bash
    npm start
    ```
@@ -56,6 +62,8 @@ A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (
    ```bash
    npm run dev
    ```
+
+   Set `PORT` to change the listening port (default: `3001`).
 
 ## Claude Code Setup
 
@@ -80,8 +88,6 @@ If you have not already done this in the main setup, run:
 npm run extract
 ```
 
-This writes a `.env` file with the required HopGPT cookies/tokens. If you need the manual path, follow the steps in the main **Setup** section above.
-
 ### 3) Configure Claude Code `settings.json`
 
 Create or edit `~/.claude/settings.json`:
@@ -90,7 +96,7 @@ Create or edit `~/.claude/settings.json`:
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "test",
     "ANTHROPIC_BASE_URL": "http://localhost:3001",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-20250514"
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5-thinking"
   }
 }
 ```
@@ -103,7 +109,7 @@ If you prefer shell environment variables instead of `settings.json`:
 ```bash
 export ANTHROPIC_AUTH_TOKEN=test
 export ANTHROPIC_BASE_URL=http://localhost:3001
-export ANTHROPIC_MODEL=claude-sonnet-4-20250514
+export ANTHROPIC_MODEL=claude-sonnet-4-5-thinking
 ```
 
 ### 5) Troubleshooting common issues
@@ -112,15 +118,15 @@ export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 - **`authentication_error` from HoProxy**: Your HopGPT cookies/tokens are missing or expired. Re-run `npm run extract` and restart the server.
 - **401/403 from HopGPT**: The refresh token likely expired; re-authenticate and re-extract credentials.
 - **Cloudflare "Attention Required" page**: Your Cloudflare cookies or user agent are missing/expired. Re-run `npm run extract` and restart the server.
-- **Model warning or not found**: Use a supported model from the list below or update `ANTHROPIC_MODEL`.
+- **Model warning or not found**: Use a supported model from the list below or call `GET /v1/models`.
 - **Claude Code still calling Anthropic**: Confirm `ANTHROPIC_BASE_URL` is set and restart Claude Code.
 
 ### 6) Available models and their capabilities
 
-| Model (canonical) | HopGPT backend | Capability notes |
-|-------------------|----------------|------------------|
-| `claude-opus-4-5-thinking` | `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. |
-| `claude-sonnet-4-5-thinking` | `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. |
+| Model (canonical) | HopGPT backend | Capability notes | Max tokens |
+|-------------------|----------------|------------------|------------|
+| `claude-opus-4-5-thinking` | `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. | 32768 |
+| `claude-sonnet-4-5-thinking` | `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. | 16384 |
 
 Aliases accepted by the proxy include:
 - `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4.5-thinking`
@@ -134,16 +140,16 @@ Aliases accepted by the proxy include:
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://localhost:3001",
-    api_key="dummy"  # Not used, but required by SDK
+    api_key="dummy",  # Not used, but required by the SDK
+    base_url="http://localhost:3001"  # Or set ANTHROPIC_BASE_URL
 )
 
-response = client.messages.create(
-    model="claude-opus-4.5",
+message = client.messages.create(
+    model="claude-sonnet-4-5-thinking",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
-print(response.content[0].text)
+print(message.content)
 ```
 
 ### With Anthropic SDK (JavaScript)
@@ -152,17 +158,20 @@ print(response.content[0].text)
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({
-  baseURL: 'http://localhost:3001',
-  apiKey: 'dummy'
+  apiKey: process.env['ANTHROPIC_API_KEY'] || 'dummy',
+  baseURL: 'http://localhost:3001'
 });
 
-const response = await client.messages.create({
-  model: 'claude-opus-4.5',
+const message = await client.messages.create({
+  model: 'claude-sonnet-4-5-thinking',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Hello!' }]
 });
-console.log(response.content[0].text);
+
+console.log(message.content);
 ```
+
+If your SDK version does not support `baseURL`, use the `curl` example below instead.
 
 ### With curl
 
@@ -170,7 +179,7 @@ console.log(response.content[0].text);
 curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4.5",
+    "model": "claude-sonnet-4-5-thinking",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -182,11 +191,23 @@ curl http://localhost:3001/v1/messages \
 curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-opus-4.5",
+    "model": "claude-sonnet-4-5-thinking",
     "max_tokens": 1024,
     "stream": true,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
+```
+
+### List available models
+
+```bash
+curl http://localhost:3001/v1/models
+```
+
+### Manually refresh the HopGPT token
+
+```bash
+curl -X POST http://localhost:3001/refresh-token
 ```
 
 ## Environment Variables
@@ -201,22 +222,29 @@ curl http://localhost:3001/v1/messages \
 | `HOPGPT_COOKIE_CF_BM` | Cloudflare bot management cookie |
 | `HOPGPT_COOKIE_REFRESH_TOKEN` | Refresh token cookie (required for auto-refresh) |
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
-| `CONVERSATION_TTL_MS` | In-memory conversation state TTL in milliseconds (default: 21600000) |
+| `CONVERSATION_TTL_MS` | In-memory conversation state TTL in ms (default: 21600000) |
+
+Extraction-only:
+- `HOPGPT_PUPPETEER_CHANNEL`
+- `HOPGPT_PUPPETEER_USER_DATA_DIR`
 
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/v1/messages` | POST | Anthropic Messages API |
+| `/v1/messages` | POST | Anthropic Messages API (streaming and non-streaming) |
+| `/v1/models` | GET | List available models |
+| `/v1/models/:model_id` | GET | Fetch a specific model |
+| `/refresh-token` | POST | Refresh HopGPT bearer token using refresh cookie |
 | `/health` | GET | Health check |
 
 ## Conversation State
 
 The proxy tracks HopGPT conversation threading in-memory so multi-turn requests can reuse context and cache keys.
 
-- Provide a stable session key via `X-Session-Id` or `metadata.session_id` / `metadata.conversation_id`.
+- Provide a stable session key via `X-Session-Id` (or `X-SessionID`) or `metadata.session_id`, `metadata.sessionId`, `metadata.conversation_id`, or `metadata.conversationId`.
 - If missing, the proxy generates a session ID and returns it in the `X-Session-Id` response header.
-- Reset the session with `X-Conversation-Reset: true` or `metadata.conversation_reset: true`.
+- Reset the session with `X-Conversation-Reset: true` or `metadata.conversation_reset`, `metadata.reset`, or `metadata.new_conversation` set to `true`.
 
 Conversation state is stored in-memory and expires after `CONVERSATION_TTL_MS` (default 6 hours).
 
@@ -224,7 +252,7 @@ Conversation state is stored in-memory and expires after `CONVERSATION_TTL_MS` (
 
 ### Automatic Token Refresh
 
-The proxy now includes **automatic token refresh**. When a request fails with a 401/403 authentication error, the proxy will:
+When a request fails with a 401/403 authentication error, the proxy will:
 
 1. Call the HopGPT refresh endpoint (`/api/auth/refresh`)
 2. Obtain a new bearer token using the refresh token cookie
@@ -255,14 +283,26 @@ HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 src/
 ├── index.js                    # Express server entry point
 ├── routes/
-│   └── messages.js             # /v1/messages endpoint
+│   ├── messages.js             # /v1/messages endpoint
+│   ├── models.js               # /v1/models endpoints
+│   └── refreshToken.js         # /refresh-token endpoint
 ├── transformers/
 │   ├── anthropicToHopGPT.js    # Request transformation
 │   └── hopGPTToAnthropic.js    # SSE response transformation
 ├── services/
-│   └── hopgptClient.js         # HopGPT API client
+│   ├── browserCredentials.js   # Puppeteer credential extraction
+│   ├── conversationStore.js    # In-memory session storage
+│   ├── hopgptClient.js         # HopGPT API client
+│   └── tlsClient.js            # TLS fingerprinted requests
 └── utils/
+    ├── modelMapping.js         # Model alias mapping
     └── sseParser.js            # SSE stream parsing
+```
+
+## Testing
+
+```bash
+npm test
 ```
 
 ## License
