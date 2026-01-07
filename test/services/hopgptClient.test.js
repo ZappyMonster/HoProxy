@@ -98,4 +98,133 @@ describe('HopGPTClient', () => {
       error: { type: 'rate_limit_error', message: 'Too many requests' }
     });
   });
+
+  it('includes retry_after_seconds in rate limit error when retryAfterMs is provided', () => {
+    const rateError = new HopGPTError(429, 'Rate limited', null, 5000);
+    expect(rateError.toAnthropicError()).toEqual({
+      type: 'error',
+      error: {
+        type: 'rate_limit_error',
+        message: 'Rate limited',
+        retry_after_seconds: 5
+      }
+    });
+  });
+
+  describe('rate limiting', () => {
+    it('retries on 429 with exponential backoff', async () => {
+      const rateLimitResponse = createMockTLSResponse({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        body: 'rate limited',
+        headers: { 'retry-after': '1' }
+      });
+      const successResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: 'data: {"type":"text"}\n\n'
+      });
+
+      let callCount = 0;
+      tlsFetchSpy.mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return rateLimitResponse;
+        }
+        return successResponse;
+      });
+
+      const client = new HopGPTClient({
+        baseURL: 'https://example.com',
+        bearerToken: 'token',
+        refreshToken: 'refresh-token',
+        rateLimitMaxRetries: 3,
+        rateLimitBaseDelayMs: 10  // Use short delay for tests
+      });
+
+      const response = await client.sendMessage({ text: 'hello' });
+      expect(response.ok).toBe(true);
+      expect(tlsFetchSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws error when rate limit retries are exhausted', async () => {
+      const rateLimitResponse = createMockTLSResponse({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        body: 'rate limited',
+        headers: {}
+      });
+
+      tlsFetchSpy.mockResolvedValue(rateLimitResponse);
+
+      const client = new HopGPTClient({
+        baseURL: 'https://example.com',
+        bearerToken: 'token',
+        refreshToken: 'refresh-token',
+        rateLimitMaxRetries: 2,
+        rateLimitBaseDelayMs: 10
+      });
+
+      await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
+        'Rate limit retries exhausted. Please try again later.'
+      );
+      // Initial attempt + 2 retries = 3 calls
+      expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not retry when Retry-After exceeds maxWaitTimeMs', async () => {
+      const rateLimitResponse = createMockTLSResponse({
+        ok: false,
+        status: 429,
+        statusText: 'Too Many Requests',
+        body: 'rate limited',
+        headers: { 'retry-after': '60' }  // 60 seconds
+      });
+
+      tlsFetchSpy.mockResolvedValue(rateLimitResponse);
+
+      const client = new HopGPTClient({
+        baseURL: 'https://example.com',
+        bearerToken: 'token',
+        refreshToken: 'refresh-token',
+        rateLimitMaxRetries: 3,
+        rateLimitMaxWaitTimeMs: 10000  // 10 seconds max
+      });
+
+      await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
+        'Rate limited. Retry after 60 seconds.'
+      );
+      // Should only call once since Retry-After exceeds max wait time
+      expect(tlsFetchSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('extracts numeric Retry-After header', () => {
+      const client = new HopGPTClient();
+
+      expect(client._extractRetryAfter({ 'retry-after': '5' })).toBe(5000);
+      expect(client._extractRetryAfter({ 'Retry-After': '10' })).toBe(10000);
+      expect(client._extractRetryAfter({})).toBe(null);
+    });
+
+    it('calculates backoff delay with jitter', () => {
+      const client = new HopGPTClient({
+        rateLimitBaseDelayMs: 1000,
+        rateLimitMaxDelayMs: 30000
+      });
+
+      // With Retry-After within max wait time, use Retry-After
+      expect(client._calculateBackoffDelay(0, 5000)).toBe(5000);
+
+      // Without Retry-After, use exponential backoff
+      const delay0 = client._calculateBackoffDelay(0, null);
+      expect(delay0).toBeGreaterThanOrEqual(1000);
+      expect(delay0).toBeLessThanOrEqual(1300);  // Base + 30% jitter
+
+      const delay1 = client._calculateBackoffDelay(1, null);
+      expect(delay1).toBeGreaterThanOrEqual(2000);
+      expect(delay1).toBeLessThanOrEqual(2600);
+    });
+  });
 });
