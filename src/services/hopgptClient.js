@@ -20,6 +20,35 @@ export class HopGPTClient {
   }
 
   /**
+   * Build browser-like headers to pass Cloudflare bot detection
+   * @returns {object} Headers object with browser-like values
+   */
+  buildBrowserHeaders() {
+    const headers = {
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Ch-Ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"macOS"',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+      'Connection': 'keep-alive'
+    };
+
+    if (this.userAgent) {
+      headers['User-Agent'] = this.userAgent;
+    } else {
+      // Default to a realistic Chrome user agent if none provided
+      headers['User-Agent'] = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
+    }
+
+    return headers;
+  }
+
+  /**
    * Build the cookie header string from configured cookies
    * @returns {string} Cookie header value
    */
@@ -91,16 +120,14 @@ export class HopGPTClient {
     try {
       const url = `${this.baseURL}/api/auth/refresh`;
 
+      // Start with browser-like headers to pass Cloudflare
       const headers = {
+        ...this.buildBrowserHeaders(),
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'Origin': this.baseURL,
         'Referer': `${this.baseURL}/`
       };
-
-      if (this.userAgent) {
-        headers['User-Agent'] = this.userAgent;
-      }
 
       const cookieHeader = this.buildCookieHeader();
       if (cookieHeader) {
@@ -148,16 +175,14 @@ export class HopGPTClient {
   async sendMessage(hopGPTRequest, isRetry = false) {
     const url = `${this.baseURL}${this.endpoint}`;
 
+    // Start with browser-like headers to pass Cloudflare
     const headers = {
+      ...this.buildBrowserHeaders(),
       'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
       'Origin': this.baseURL,
       'Referer': `${this.baseURL}/c/new`
     };
-
-    if (this.userAgent) {
-      headers['User-Agent'] = this.userAgent;
-    }
 
     // Add Bearer token if configured
     if (this.bearerToken) {
