@@ -20,6 +20,69 @@ export class HopGPTClient {
     };
     this.autoRefresh = config.autoRefresh !== false;
     this.isRefreshing = false;
+
+    // Rate limiting configuration
+    this.rateLimitConfig = {
+      maxRetries: config.rateLimitMaxRetries ?? 3,
+      baseDelayMs: config.rateLimitBaseDelayMs ?? 1000,
+      maxDelayMs: config.rateLimitMaxDelayMs ?? 30000,
+      maxWaitTimeMs: config.rateLimitMaxWaitTimeMs ?? 10000  // Wait for short limits (≤10 sec)
+    };
+  }
+
+  /**
+   * Extract retry delay from Retry-After header
+   * @param {object} headers - Response headers
+   * @returns {number|null} Delay in milliseconds, or null if not present
+   */
+  _extractRetryAfter(headers) {
+    const retryAfter = headers['retry-after'] || headers['Retry-After'];
+    if (!retryAfter) {
+      return null;
+    }
+
+    // Retry-After can be either a number of seconds or an HTTP-date
+    const seconds = parseInt(retryAfter, 10);
+    if (!isNaN(seconds)) {
+      return seconds * 1000;
+    }
+
+    // Try parsing as HTTP-date
+    const date = new Date(retryAfter);
+    if (!isNaN(date.getTime())) {
+      const delayMs = date.getTime() - Date.now();
+      return Math.max(0, delayMs);
+    }
+
+    return null;
+  }
+
+  /**
+   * Calculate exponential backoff delay
+   * @param {number} attempt - Current retry attempt (0-indexed)
+   * @param {number|null} retryAfterMs - Retry-After header value in milliseconds
+   * @returns {number} Delay in milliseconds
+   */
+  _calculateBackoffDelay(attempt, retryAfterMs) {
+    // If Retry-After is provided and within our max wait time, use it
+    if (retryAfterMs !== null && retryAfterMs <= this.rateLimitConfig.maxWaitTimeMs) {
+      return retryAfterMs;
+    }
+
+    // Otherwise, use exponential backoff: baseDelay * 2^attempt with jitter
+    const exponentialDelay = this.rateLimitConfig.baseDelayMs * Math.pow(2, attempt);
+    const jitter = Math.random() * 0.3 * exponentialDelay; // 0-30% jitter
+    const delay = Math.min(exponentialDelay + jitter, this.rateLimitConfig.maxDelayMs);
+
+    return Math.round(delay);
+  }
+
+  /**
+   * Sleep for a specified duration
+   * @param {number} ms - Duration in milliseconds
+   */
+  async _sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
@@ -216,10 +279,10 @@ export class HopGPTClient {
   /**
    * Send a message to HopGPT
    * @param {object} hopGPTRequest - Request body in HopGPT format
-   * @param {boolean} isRetry - Whether this is a retry after token refresh
+   * @param {object} retryState - Internal retry state
    * @returns {Response} Fetch-like response object with body as string (SSE data)
    */
-  async sendMessage(hopGPTRequest, isRetry = false) {
+  async sendMessage(hopGPTRequest, retryState = { isAuthRetry: false, rateLimitAttempt: 0 }) {
     const url = `${this.baseURL}${this.endpoint}`;
 
     // Detect browser type from User-Agent
@@ -256,14 +319,58 @@ export class HopGPTClient {
     });
 
     if (!response.ok) {
+      // Handle rate limiting (429)
+      if (response.status === 429) {
+        const retryAfterMs = this._extractRetryAfter(response.headers);
+        const { rateLimitAttempt } = retryState;
+
+        console.log(`[HopGPT] Rate limited (429). Attempt ${rateLimitAttempt + 1}/${this.rateLimitConfig.maxRetries}. ` +
+          `Retry-After: ${retryAfterMs !== null ? `${retryAfterMs}ms` : 'not specified'}`);
+
+        // Check if we should retry
+        const canRetry = rateLimitAttempt < this.rateLimitConfig.maxRetries;
+        const waitTime = this._calculateBackoffDelay(rateLimitAttempt, retryAfterMs);
+
+        // If Retry-After exceeds our max wait time, don't retry
+        if (retryAfterMs !== null && retryAfterMs > this.rateLimitConfig.maxWaitTimeMs) {
+          console.log(`[HopGPT] Rate limit wait time (${retryAfterMs}ms) exceeds max wait time ` +
+            `(${this.rateLimitConfig.maxWaitTimeMs}ms). Returning error to client.`);
+          throw new HopGPTError(
+            response.status,
+            `Rate limited. Retry after ${Math.ceil(retryAfterMs / 1000)} seconds.`,
+            response.body,
+            retryAfterMs
+          );
+        }
+
+        if (canRetry) {
+          console.log(`[HopGPT] Waiting ${waitTime}ms before retry...`);
+          await this._sleep(waitTime);
+
+          return this.sendMessage(hopGPTRequest, {
+            ...retryState,
+            rateLimitAttempt: rateLimitAttempt + 1
+          });
+        }
+
+        // Retries exhausted
+        console.log(`[HopGPT] Rate limit retries exhausted after ${rateLimitAttempt + 1} attempts.`);
+        throw new HopGPTError(
+          response.status,
+          'Rate limit retries exhausted. Please try again later.',
+          response.body,
+          retryAfterMs
+        );
+      }
+
       // Check if this is an auth error and we can retry
-      if ((response.status === 401 || response.status === 403) && this.autoRefresh && !isRetry) {
+      if ((response.status === 401 || response.status === 403) && this.autoRefresh && !retryState.isAuthRetry) {
         console.log(`[HopGPT] Auth error (${response.status}), attempting token refresh...`);
 
         const refreshed = await this.refreshTokens();
         if (refreshed) {
           console.log('[HopGPT] Retrying request with new token...');
-          return this.sendMessage(hopGPTRequest, true);
+          return this.sendMessage(hopGPTRequest, { ...retryState, isAuthRetry: true });
         }
       }
 
@@ -358,11 +465,12 @@ export class HopGPTClient {
  * Custom error class for HopGPT API errors
  */
 export class HopGPTError extends Error {
-  constructor(statusCode, message, responseBody = null) {
+  constructor(statusCode, message, responseBody = null, retryAfterMs = null) {
     super(message);
     this.name = 'HopGPTError';
     this.statusCode = statusCode;
     this.responseBody = responseBody;
+    this.retryAfterMs = retryAfterMs;
   }
 
   /**
@@ -382,13 +490,20 @@ export class HopGPTError extends Error {
       errorType = 'api_error';
     }
 
-    return {
+    const error = {
       type: 'error',
       error: {
         type: errorType,
         message: this.message
       }
     };
+
+    // Include retry-after information for rate limit errors
+    if (this.statusCode === 429 && this.retryAfterMs !== null) {
+      error.error.retry_after_seconds = Math.ceil(this.retryAfterMs / 1000);
+    }
+
+    return error;
   }
 }
 
