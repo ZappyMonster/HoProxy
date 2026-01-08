@@ -27,6 +27,14 @@ describe('models routes', () => {
     expect(response.body.id).toBe('claude-opus-4-5-thinking');
   });
 
+  it('returns the haiku model', async () => {
+    const app = createApp();
+    const response = await request(app).get('/v1/models/claude-haiku-4-5-thinking');
+
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe('claude-haiku-4-5-thinking');
+  });
+
   it('returns a not_found_error for unknown models', async () => {
     const app = createApp();
     const response = await request(app).get('/v1/models/unknown-model');

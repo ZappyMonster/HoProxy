@@ -16,6 +16,15 @@ const MODEL_MAPPINGS = Object.freeze([
       'claude-sonnet-4.5',
       'claude-sonnet-4.5-thinking'
     ]
+  },
+  {
+    canonical: 'claude-haiku-4-5-thinking',
+    hopgpt: 'claude-haiku-4.5',
+    aliases: [
+      'claude-haiku-4-5',
+      'claude-haiku-4.5',
+      'claude-haiku-4.5-thinking'
+    ]
   }
 ]);
 
