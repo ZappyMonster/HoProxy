@@ -1,5 +1,114 @@
 import { v4 as uuidv4 } from 'uuid';
 
+const MCP_TOOL_CALL_BLOCK_RE = /<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>/gi;
+const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call>';
+
+function extractXmlTagValue(source, tagName) {
+  if (!source) {
+    return null;
+  }
+  const matcher = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+  const match = source.match(matcher);
+  return match ? match[1].trim() : null;
+}
+
+function parseMcpToolCallBlock(block) {
+  const serverName = extractXmlTagValue(block, 'server_name');
+  const toolName = extractXmlTagValue(block, 'tool_name');
+  const argsText = extractXmlTagValue(block, 'arguments');
+
+  if (!toolName || !argsText) {
+    return null;
+  }
+
+  let parsedArgs = {};
+  try {
+    parsedArgs = JSON.parse(argsText.trim());
+  } catch (error) {
+    console.warn('Failed to parse MCP tool call arguments:', error);
+    return null;
+  }
+
+  return {
+    serverName,
+    toolName,
+    arguments: parsedArgs
+  };
+}
+
+function splitMcpToolCalls(text) {
+  if (!text) {
+    return [];
+  }
+
+  const segments = [];
+  let lastIndex = 0;
+
+  MCP_TOOL_CALL_BLOCK_RE.lastIndex = 0;
+  let match = null;
+  while ((match = MCP_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
+    }
+    const toolCall = parseMcpToolCallBlock(match[0]);
+    if (toolCall) {
+      segments.push({ type: 'tool_call', toolCall });
+    }
+    lastIndex = MCP_TOOL_CALL_BLOCK_RE.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    segments.push({ type: 'text', text: text.slice(lastIndex) });
+  }
+
+  return segments;
+}
+
+function splitStreamTextForMcpToolCalls(text) {
+  const segments = [];
+  let lastIndex = 0;
+
+  MCP_TOOL_CALL_BLOCK_RE.lastIndex = 0;
+  let match = null;
+  while ((match = MCP_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
+    }
+    const toolCall = parseMcpToolCallBlock(match[0]);
+    if (toolCall) {
+      segments.push({ type: 'tool_call', toolCall });
+    }
+    lastIndex = MCP_TOOL_CALL_BLOCK_RE.lastIndex;
+  }
+
+  const trailing = text.slice(lastIndex);
+  if (!trailing) {
+    return { segments, remainder: '' };
+  }
+
+  const startIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
+  if (startIndex !== -1) {
+    if (startIndex > 0) {
+      segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
+    }
+    return { segments, remainder: trailing.slice(startIndex) };
+  }
+
+  const lastLt = trailing.lastIndexOf('<');
+  if (lastLt !== -1) {
+    const possibleTag = trailing.slice(lastLt);
+    if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag)) {
+      if (lastLt > 0) {
+        segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
+      }
+      return { segments, remainder: possibleTag };
+    }
+  }
+
+  segments.push({ type: 'text', text: trailing });
+  return { segments, remainder: '' };
+}
+
 /**
  * Check if a model supports extended thinking
  * @param {string} model - Model name
@@ -93,6 +202,7 @@ export class HopGPTToAnthropicTransformer {
     this.accumulatedText = '';    // For backward compatibility
     this.accumulatedThinking = '';
     this.thinkingSignature = null;
+    this.mcpToolCallBuffer = '';
 
     // Tool use support
     this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
@@ -229,114 +339,32 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle text blocks
     if (block.type === 'text' && block.text) {
-      // If we were in a different block type, close it first
-      if (this.blockStarted && this.currentBlockType !== 'text') {
-        events.push(this._createBlockStop());
-      }
+      const combined = `${this.mcpToolCallBuffer}${block.text}`;
+      const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
+      this.mcpToolCallBuffer = remainder;
 
-      // Start text block if needed
-      if (!this.blockStarted || this.currentBlockType !== 'text') {
-        const startEvent = this._createBlockStart('text');
-        if (startEvent) events.push(startEvent);
-      }
-
-      // Add text delta
-      this.accumulatedText += block.text;
-      events.push({
-        event: 'content_block_delta',
-        data: {
-          type: 'content_block_delta',
-          index: this.currentBlockIndex,
-          delta: {
-            type: 'text_delta',
-            text: block.text
-          }
+      for (const segment of segments) {
+        if (segment.type === 'text') {
+          events.push(...this._emitTextDelta(segment.text));
+          continue;
         }
-      });
+        if (segment.type === 'tool_call') {
+          const toolBlock = {
+            type: 'tool_use',
+            id: generateToolUseId(),
+            name: segment.toolCall.toolName,
+            input: segment.toolCall.arguments
+          };
+          events.push(...this._processToolUseBlock(toolBlock));
+        }
+      }
 
-      return events;
+      return events.length > 0 ? events : null;
     }
 
     // Handle tool_use blocks
     if (block.type === 'tool_use') {
-      this.hasToolUse = true;
-
-      // Check if this is a new tool call or continuation of existing
-      const toolId = block.id || (this.currentToolUse?.id);
-      const toolName = block.name || (this.currentToolUse?.name);
-
-      // If we were in a different block type or different tool, close it first
-      if (this.blockStarted && (this.currentBlockType !== 'tool_use' ||
-          (this.currentToolUse && this.currentToolUse.id !== toolId))) {
-        // Save the completed tool use before closing
-        if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
-          this.accumulatedToolUses.push({...this.currentToolUse});
-        }
-        events.push(this._createBlockStop());
-      }
-
-      // Start new tool_use block if needed
-      if (!this.blockStarted || this.currentBlockType !== 'tool_use' ||
-          (this.currentToolUse && this.currentToolUse.id !== toolId)) {
-        // Initialize new tool use
-        this.currentToolUse = {
-          id: toolId || generateToolUseId(),
-          name: toolName || '',
-          inputJson: ''
-        };
-        const startEvent = this._createBlockStart('tool_use', this.currentToolUse);
-        if (startEvent) events.push(startEvent);
-      }
-
-      // Update tool name if provided
-      if (block.name && !this.currentToolUse.name) {
-        this.currentToolUse.name = block.name;
-      }
-
-      // Handle input JSON delta
-      if (block.input !== undefined) {
-        let inputDelta = '';
-        if (typeof block.input === 'string') {
-          inputDelta = block.input;
-          this.currentToolUse.inputJson += inputDelta;
-        } else if (typeof block.input === 'object') {
-          // Full input object - stringify and set (not accumulate)
-          inputDelta = JSON.stringify(block.input);
-          this.currentToolUse.inputJson = inputDelta;
-        }
-
-        if (inputDelta) {
-          events.push({
-            event: 'content_block_delta',
-            data: {
-              type: 'content_block_delta',
-              index: this.currentBlockIndex,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: inputDelta
-              }
-            }
-          });
-        }
-      }
-
-      // Handle partial JSON chunks (input_json field for streaming)
-      if (block.input_json !== undefined) {
-        this.currentToolUse.inputJson += block.input_json;
-        events.push({
-          event: 'content_block_delta',
-          data: {
-            type: 'content_block_delta',
-            index: this.currentBlockIndex,
-            delta: {
-              type: 'input_json_delta',
-              partial_json: block.input_json
-            }
-          }
-        });
-      }
-
-      return events;
+      return this._processToolUseBlock(block);
     }
 
     return null;
@@ -354,10 +382,27 @@ export class HopGPTToAnthropicTransformer {
           signature: block.signature || this.thinkingSignature
         });
       } else if (block.type === 'text') {
-        this.contentBlocks.push({
-          type: 'text',
-          text: block.text || ''
-        });
+        const segments = splitMcpToolCalls(block.text || '');
+        for (const segment of segments) {
+          if (segment.type === 'text') {
+            if (!segment.text) continue;
+            this.contentBlocks.push({
+              type: 'text',
+              text: segment.text
+            });
+            this.accumulatedText += segment.text;
+            continue;
+          }
+          if (segment.type === 'tool_call') {
+            this.hasToolUse = true;
+            this.contentBlocks.push({
+              type: 'tool_use',
+              id: generateToolUseId(),
+              name: segment.toolCall.toolName,
+              input: segment.toolCall.arguments || {}
+            });
+          }
+        }
       } else if (block.type === 'tool_use') {
         this.hasToolUse = true;
         let input = block.input;
@@ -379,6 +424,119 @@ export class HopGPTToAnthropicTransformer {
         });
       }
     }
+  }
+
+  _emitTextDelta(text) {
+    if (!text) {
+      return [];
+    }
+
+    const events = [];
+
+    if (this.blockStarted && this.currentBlockType !== 'text') {
+      events.push(this._createBlockStop());
+    }
+
+    if (!this.blockStarted || this.currentBlockType !== 'text') {
+      const startEvent = this._createBlockStart('text');
+      if (Array.isArray(startEvent)) {
+        events.push(...startEvent);
+      } else if (startEvent) {
+        events.push(startEvent);
+      }
+    }
+
+    this.accumulatedText += text;
+    events.push({
+      event: 'content_block_delta',
+      data: {
+        type: 'content_block_delta',
+        index: this.currentBlockIndex,
+        delta: {
+          type: 'text_delta',
+          text
+        }
+      }
+    });
+
+    return events;
+  }
+
+  _processToolUseBlock(block) {
+    const events = [];
+    this.hasToolUse = true;
+
+    const toolId = block.id || (this.currentToolUse?.id);
+    const toolName = block.name || (this.currentToolUse?.name);
+
+    if (this.blockStarted && (this.currentBlockType !== 'tool_use' ||
+        (this.currentToolUse && this.currentToolUse.id !== toolId))) {
+      if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
+        this.accumulatedToolUses.push({...this.currentToolUse});
+      }
+      events.push(this._createBlockStop());
+    }
+
+    if (!this.blockStarted || this.currentBlockType !== 'tool_use' ||
+        (this.currentToolUse && this.currentToolUse.id !== toolId)) {
+      this.currentToolUse = {
+        id: toolId || generateToolUseId(),
+        name: toolName || '',
+        inputJson: ''
+      };
+      const startEvent = this._createBlockStart('tool_use', this.currentToolUse);
+      if (Array.isArray(startEvent)) {
+        events.push(...startEvent);
+      } else if (startEvent) {
+        events.push(startEvent);
+      }
+    }
+
+    if (block.name && !this.currentToolUse.name) {
+      this.currentToolUse.name = block.name;
+    }
+
+    if (block.input !== undefined) {
+      let inputDelta = '';
+      if (typeof block.input === 'string') {
+        inputDelta = block.input;
+        this.currentToolUse.inputJson += inputDelta;
+      } else if (typeof block.input === 'object') {
+        inputDelta = JSON.stringify(block.input);
+        this.currentToolUse.inputJson = inputDelta;
+      }
+
+      if (inputDelta) {
+        events.push({
+          event: 'content_block_delta',
+          data: {
+            type: 'content_block_delta',
+            index: this.currentBlockIndex,
+            delta: {
+              type: 'input_json_delta',
+              partial_json: inputDelta
+            }
+          }
+        });
+      }
+    }
+
+    if (block.input_json !== undefined) {
+      this.currentToolUse.inputJson += block.input_json;
+      events.push({
+        event: 'content_block_delta',
+        data: {
+          type: 'content_block_delta',
+          index: this.currentBlockIndex,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: block.input_json
+          }
+        }
+      });
+    }
+
+    return events;
   }
 
   _getGeneratedText() {
