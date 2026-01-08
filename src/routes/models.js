@@ -23,6 +23,14 @@ const AVAILABLE_MODELS = [
     display_name: 'Claude Sonnet 4.5 (Thinking)',
     max_tokens: 16384,
   },
+  {
+    id: 'claude-haiku-4-5-thinking',
+    object: 'model',
+    created: 1735689600, // 2025-01-01
+    owned_by: 'anthropic',
+    display_name: 'Claude Haiku 4.5 (Thinking)',
+    max_tokens: 8192,
+  },
 ];
 
 /**

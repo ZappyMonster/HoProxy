@@ -127,10 +127,12 @@ export ANTHROPIC_MODEL=claude-sonnet-4-5-thinking
 |-------------------|----------------|------------------|------------|
 | `claude-opus-4-5-thinking` | `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. | 32768 |
 | `claude-sonnet-4-5-thinking` | `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. | 16384 |
+| `claude-haiku-4-5-thinking` | `claude-haiku-4.5` | Fastest model; best for low-latency tasks. | 8192 |
 
 Aliases accepted by the proxy include:
 - `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4.5-thinking`
 - `claude-sonnet-4-5`, `claude-sonnet-4.5`, `claude-sonnet-4.5-thinking`
+- `claude-haiku-4-5`, `claude-haiku-4.5`, `claude-haiku-4.5-thinking`
 
 ## Usage
 
