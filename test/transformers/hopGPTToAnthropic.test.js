@@ -333,4 +333,77 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(toolUseBlocks[1].input).toEqual({ file_path: 'README.md' });
     expect(response.stop_reason).toBe('tool_use');
   });
+
+  it('extracts tool_call JSON blocks from text and emits tool_use', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // OpenCode <tool_call> JSON format
+    const toolCall = `<tool_call>
+{"name": "Task", "parameters": {"task": "Explore the codebase", "agent": "codebase_explorer"}}
+</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `I'll explore the project: ${toolCall} Done exploring.` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // Text should not contain the XML blocks
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain("I'll explore the project:");
+    expect(textDeltas).toContain('Done exploring.');
+    expect(textDeltas).not.toContain('<tool_call>');
+    expect(textDeltas).not.toContain('codebase_explorer');
+
+    // tool_use block should be created
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStart).toBeTruthy();
+    expect(toolStart.data.content_block.name).toBe('Task');
+
+    // Non-streaming response should have the tool_use block
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Task');
+    expect(toolUseBlocks[0].input).toEqual({
+      task: 'Explore the codebase',
+      agent: 'codebase_explorer'
+    });
+    expect(response.stop_reason).toBe('tool_use');
+  });
 });

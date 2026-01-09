@@ -8,8 +8,12 @@ const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call>';
 const FUNCTION_CALLS_BLOCK_RE = /<function_calls>[\s\S]*?<\/function_calls>/gi;
 const FUNCTION_CALLS_START_TAG = '<function_calls>';
 
+// Pattern for <tool_call> blocks with JSON (another OpenCode format)
+const TOOL_CALL_JSON_BLOCK_RE = /<tool_call>[\s\S]*?<\/tool_call>/gi;
+const TOOL_CALL_JSON_START_TAG = '<tool_call>';
+
 // Combined pattern for any tool call format
-const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>|<function_calls>[\s\S]*?<\/function_calls>)/gi;
+const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>|<function_calls>[\s\S]*?<\/function_calls>|<tool_call>[\s\S]*?<\/tool_call>)/gi;
 
 function extractXmlTagValue(source, tagName) {
   if (!source) {
@@ -97,6 +101,36 @@ function parseFunctionCallsBlock(block) {
 }
 
 /**
+ * Parse <tool_call> block with JSON content
+ * Format: <tool_call>{"name": "ToolName", "parameters": {...}}</tool_call>
+ */
+function parseToolCallJsonBlock(block) {
+  const jsonContent = extractXmlTagValue(block, 'tool_call');
+  if (!jsonContent) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonContent.trim());
+    const toolName = parsed.name;
+    const args = parsed.parameters || parsed.arguments || parsed.input || {};
+
+    if (!toolName) {
+      return null;
+    }
+
+    return {
+      serverName: null,
+      toolName,
+      arguments: args
+    };
+  } catch (error) {
+    console.warn('Failed to parse tool_call JSON:', error);
+    return null;
+  }
+}
+
+/**
  * Parse any tool call block format and return array of tool calls
  */
 function parseAnyToolCallBlock(block) {
@@ -107,6 +141,10 @@ function parseAnyToolCallBlock(block) {
   }
   if (blockLower.includes('<function_calls>')) {
     return parseFunctionCallsBlock(block);
+  }
+  if (blockLower.includes('<tool_call>')) {
+    const toolCall = parseToolCallJsonBlock(block);
+    return toolCall ? [toolCall] : [];
   }
   return [];
 }
@@ -163,18 +201,16 @@ function splitStreamTextForMcpToolCalls(text) {
     return { segments, remainder: '' };
   }
 
-  // Check for partial <mcp_tool_call> or <function_calls> tags
+  // Check for partial <mcp_tool_call>, <function_calls>, or <tool_call> tags
   const mcpStartIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
   const funcStartIndex = trailing.indexOf(FUNCTION_CALLS_START_TAG);
+  const toolCallStartIndex = trailing.indexOf(TOOL_CALL_JSON_START_TAG);
 
   // Find the earliest partial tag
   let startIndex = -1;
-  if (mcpStartIndex !== -1 && funcStartIndex !== -1) {
-    startIndex = Math.min(mcpStartIndex, funcStartIndex);
-  } else if (mcpStartIndex !== -1) {
-    startIndex = mcpStartIndex;
-  } else if (funcStartIndex !== -1) {
-    startIndex = funcStartIndex;
+  const indices = [mcpStartIndex, funcStartIndex, toolCallStartIndex].filter(i => i !== -1);
+  if (indices.length > 0) {
+    startIndex = Math.min(...indices);
   }
 
   if (startIndex !== -1) {
@@ -184,12 +220,13 @@ function splitStreamTextForMcpToolCalls(text) {
     return { segments, remainder: trailing.slice(startIndex) };
   }
 
-  // Check for partial tag at end (e.g., "<mcp_tool" or "<function")
+  // Check for partial tag at end (e.g., "<mcp_tool" or "<function" or "<tool_c")
   const lastLt = trailing.lastIndexOf('<');
   if (lastLt !== -1) {
     const possibleTag = trailing.slice(lastLt);
     if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag) ||
-        FUNCTION_CALLS_START_TAG.startsWith(possibleTag)) {
+        FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
+        TOOL_CALL_JSON_START_TAG.startsWith(possibleTag)) {
       if (lastLt > 0) {
         segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
       }
