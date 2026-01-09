@@ -1,7 +1,15 @@
 import { v4 as uuidv4 } from 'uuid';
 
+// Pattern for <mcp_tool_call> blocks
 const MCP_TOOL_CALL_BLOCK_RE = /<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>/gi;
 const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call>';
+
+// Pattern for <function_calls> blocks (used by OpenCode)
+const FUNCTION_CALLS_BLOCK_RE = /<function_calls>[\s\S]*?<\/function_calls>/gi;
+const FUNCTION_CALLS_START_TAG = '<function_calls>';
+
+// Combined pattern for any tool call format
+const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>|<function_calls>[\s\S]*?<\/function_calls>)/gi;
 
 function extractXmlTagValue(source, tagName) {
   if (!source) {
@@ -10,6 +18,15 @@ function extractXmlTagValue(source, tagName) {
   const matcher = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i');
   const match = source.match(matcher);
   return match ? match[1].trim() : null;
+}
+
+function extractXmlAttribute(source, tagName, attrName) {
+  if (!source) {
+    return null;
+  }
+  const matcher = new RegExp(`<${tagName}[^>]*\\s${attrName}=["']([^"']*)["']`, 'i');
+  const match = source.match(matcher);
+  return match ? match[1] : null;
 }
 
 function parseMcpToolCallBlock(block) {
@@ -36,6 +53,64 @@ function parseMcpToolCallBlock(block) {
   };
 }
 
+/**
+ * Parse a single <invoke> block from <function_calls> format
+ * Format: <invoke name="ToolName"><parameter name="paramName">value</parameter>...</invoke>
+ */
+function parseInvokeBlock(invokeBlock) {
+  const toolName = extractXmlAttribute(invokeBlock, 'invoke', 'name');
+  if (!toolName) {
+    return null;
+  }
+
+  // Extract all parameters
+  const parameterRe = /<parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/parameter>/gi;
+  const args = {};
+  let paramMatch;
+  while ((paramMatch = parameterRe.exec(invokeBlock)) !== null) {
+    const paramName = paramMatch[1];
+    const paramValue = paramMatch[2].trim();
+    args[paramName] = paramValue;
+  }
+
+  return {
+    serverName: null,
+    toolName,
+    arguments: args
+  };
+}
+
+/**
+ * Parse <function_calls> block containing one or more <invoke> blocks
+ */
+function parseFunctionCallsBlock(block) {
+  const invokeRe = /<invoke[^>]*>[\s\S]*?<\/invoke>/gi;
+  const toolCalls = [];
+  let invokeMatch;
+  while ((invokeMatch = invokeRe.exec(block)) !== null) {
+    const toolCall = parseInvokeBlock(invokeMatch[0]);
+    if (toolCall) {
+      toolCalls.push(toolCall);
+    }
+  }
+  return toolCalls;
+}
+
+/**
+ * Parse any tool call block format and return array of tool calls
+ */
+function parseAnyToolCallBlock(block) {
+  const blockLower = block.toLowerCase();
+  if (blockLower.includes('<mcp_tool_call>')) {
+    const toolCall = parseMcpToolCallBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
+  if (blockLower.includes('<function_calls>')) {
+    return parseFunctionCallsBlock(block);
+  }
+  return [];
+}
+
 function splitMcpToolCalls(text) {
   if (!text) {
     return [];
@@ -44,17 +119,18 @@ function splitMcpToolCalls(text) {
   const segments = [];
   let lastIndex = 0;
 
-  MCP_TOOL_CALL_BLOCK_RE.lastIndex = 0;
+  // Use combined pattern to match both formats
+  ANY_TOOL_CALL_BLOCK_RE.lastIndex = 0;
   let match = null;
-  while ((match = MCP_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
+  while ((match = ANY_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
     }
-    const toolCall = parseMcpToolCallBlock(match[0]);
-    if (toolCall) {
+    const toolCalls = parseAnyToolCallBlock(match[0]);
+    for (const toolCall of toolCalls) {
       segments.push({ type: 'tool_call', toolCall });
     }
-    lastIndex = MCP_TOOL_CALL_BLOCK_RE.lastIndex;
+    lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
   }
 
   if (lastIndex < text.length) {
@@ -68,17 +144,18 @@ function splitStreamTextForMcpToolCalls(text) {
   const segments = [];
   let lastIndex = 0;
 
-  MCP_TOOL_CALL_BLOCK_RE.lastIndex = 0;
+  // Use combined pattern to match both formats
+  ANY_TOOL_CALL_BLOCK_RE.lastIndex = 0;
   let match = null;
-  while ((match = MCP_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
+  while ((match = ANY_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
       segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
     }
-    const toolCall = parseMcpToolCallBlock(match[0]);
-    if (toolCall) {
+    const toolCalls = parseAnyToolCallBlock(match[0]);
+    for (const toolCall of toolCalls) {
       segments.push({ type: 'tool_call', toolCall });
     }
-    lastIndex = MCP_TOOL_CALL_BLOCK_RE.lastIndex;
+    lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
   }
 
   const trailing = text.slice(lastIndex);
@@ -86,7 +163,20 @@ function splitStreamTextForMcpToolCalls(text) {
     return { segments, remainder: '' };
   }
 
-  const startIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
+  // Check for partial <mcp_tool_call> or <function_calls> tags
+  const mcpStartIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
+  const funcStartIndex = trailing.indexOf(FUNCTION_CALLS_START_TAG);
+
+  // Find the earliest partial tag
+  let startIndex = -1;
+  if (mcpStartIndex !== -1 && funcStartIndex !== -1) {
+    startIndex = Math.min(mcpStartIndex, funcStartIndex);
+  } else if (mcpStartIndex !== -1) {
+    startIndex = mcpStartIndex;
+  } else if (funcStartIndex !== -1) {
+    startIndex = funcStartIndex;
+  }
+
   if (startIndex !== -1) {
     if (startIndex > 0) {
       segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
@@ -94,10 +184,12 @@ function splitStreamTextForMcpToolCalls(text) {
     return { segments, remainder: trailing.slice(startIndex) };
   }
 
+  // Check for partial tag at end (e.g., "<mcp_tool" or "<function")
   const lastLt = trailing.lastIndexOf('<');
   if (lastLt !== -1) {
     const possibleTag = trailing.slice(lastLt);
-    if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag)) {
+    if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag) ||
+        FUNCTION_CALLS_START_TAG.startsWith(possibleTag)) {
       if (lastLt > 0) {
         segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
       }

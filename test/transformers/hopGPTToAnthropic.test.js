@@ -255,4 +255,82 @@ describe('hopGPTToAnthropic transformer', () => {
     const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
     expect(toolUseBlocks.length).toBe(0);
   });
+
+  it('extracts function_calls/invoke blocks from text and emits tool_use', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // OpenCode format with multiple tool calls
+    const functionCalls = `<function_calls>
+<invoke name="Glob">
+<parameter name="pattern">**/</parameter>
+</invoke>
+<invoke name="Read">
+<parameter name="file_path">README.md</parameter>
+</invoke>
+</function_calls>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Let me explore: ${functionCalls} Done.` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // Text should not contain the XML blocks
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Let me explore:');
+    expect(textDeltas).toContain('Done.');
+    expect(textDeltas).not.toContain('<function_calls>');
+    expect(textDeltas).not.toContain('<invoke');
+
+    // Both tool_use blocks should be created
+    const toolStarts = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStarts.length).toBe(2);
+    expect(toolStarts[0].data.content_block.name).toBe('Glob');
+    expect(toolStarts[1].data.content_block.name).toBe('Read');
+
+    // Non-streaming response should have both tool_use blocks
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(2);
+    expect(toolUseBlocks[0].name).toBe('Glob');
+    expect(toolUseBlocks[0].input).toEqual({ pattern: '**/' });
+    expect(toolUseBlocks[1].name).toBe('Read');
+    expect(toolUseBlocks[1].input).toEqual({ file_path: 'README.md' });
+    expect(response.stop_reason).toBe('tool_use');
+  });
 });
