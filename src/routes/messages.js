@@ -91,6 +91,13 @@ router.post('/messages', async (req, res) => {
       anthropicRequest.metadata?.mcp_passthrough === true ||
       anthropicRequest.metadata?.mcpPassthrough === true;
 
+    // Debug logging
+    if (process.env.HOPGPT_DEBUG === 'true') {
+      console.log('[Messages] mcpPassthrough:', mcpPassthrough);
+      console.log('[Messages] streaming:', anthropicRequest.stream === true);
+      console.log('[Messages] tools count:', anthropicRequest.tools?.length || 0);
+    }
+
     const transformerOptions = {
       thinkingEnabled: thinkingConfig.enabled,
       maxTokens: hopGPTRequest.max_tokens,

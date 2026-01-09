@@ -136,7 +136,7 @@ Aliases accepted by the proxy include:
 
 ## OpenCode Setup
 
-Configure OpenCode to use HoProxy with MCP tool call passthrough mode.
+OpenCode supports the Anthropic tool use protocol. When HopGPT outputs XML-formatted tool calls in its text response, HoProxy automatically parses and converts them to standard Anthropic `tool_use` blocks that OpenCode can execute.
 
 ### Supported Tool Call Formats
 
@@ -201,6 +201,35 @@ When passthrough mode is enabled:
 - Tool call XML blocks remain in the text response for the client to parse
 - No `tool_use` blocks are generated from the XML
 - The client can intercept and execute the tool calls directly
+
+### Troubleshooting Tool Calls
+
+If tool calls aren't working (XML is displayed instead of executed):
+
+1. **Verify passthrough mode is disabled** - Passthrough mode should only be used for clients that parse XML directly. Most clients (including OpenCode) should use the default mode where XML is converted to `tool_use` blocks.
+
+2. **Enable debug logging** to see what's happening:
+   ```bash
+   HOPGPT_DEBUG=true npm start
+   ```
+   This will log:
+   - Incoming HopGPT events
+   - Detected tool call XML
+   - Parsed tool calls
+
+3. **Test the proxy directly** with curl:
+   ```bash
+   curl http://localhost:3001/v1/messages \
+     -H "Content-Type: application/json" \
+     -d '{
+       "model": "claude-sonnet-4-5-thinking",
+       "max_tokens": 1024,
+       "messages": [{"role": "user", "content": "What is 2+2?"}]
+     }'
+   ```
+   Check that the response contains `tool_use` blocks (not raw XML).
+
+4. **Verify your client is handling tool_use blocks** - The proxy outputs standard Anthropic `tool_use` blocks. Your client must execute them and send `tool_result` messages to continue the agentic loop.
 
 ## Usage
 

@@ -366,6 +366,11 @@ export class HopGPTToAnthropicTransformer {
   }
 
   _transformData(data) {
+    // Debug logging to trace what HopGPT sends
+    if (process.env.HOPGPT_DEBUG === 'true') {
+      console.log('[Transform] Event:', JSON.stringify(data).slice(0, 500));
+    }
+
     // Event type 1: Initial message created
     if (data.created && data.message) {
       return this._createMessageStart();
@@ -480,9 +485,30 @@ export class HopGPTToAnthropicTransformer {
         return events.length > 0 ? events : null;
       }
 
+      // Debug: Log incoming text for tool call detection
+      if (process.env.HOPGPT_DEBUG === 'true') {
+        const hasToolCallTag = block.text.includes('<tool_call>') ||
+                               block.text.includes('<function_calls>') ||
+                               block.text.includes('<mcp_tool_call>');
+        if (hasToolCallTag) {
+          console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
+        }
+      }
+
       const combined = `${this.mcpToolCallBuffer}${block.text}`;
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
+
+      // Debug: Log parsed segments
+      if (process.env.HOPGPT_DEBUG === 'true' && segments.length > 0) {
+        const toolCalls = segments.filter(s => s.type === 'tool_call');
+        if (toolCalls.length > 0) {
+          console.log(`[Transform] Parsed ${toolCalls.length} tool calls from text`);
+        }
+        if (remainder) {
+          console.log('[Transform] Buffered remainder:', remainder.slice(0, 100));
+        }
+      }
 
       for (const segment of segments) {
         if (segment.type === 'text') {
@@ -895,6 +921,25 @@ export class HopGPTToAnthropicTransformer {
 
   _createMessageStop() {
     const events = [];
+
+    // Flush any remaining buffered MCP tool calls
+    if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
+      const segments = splitMcpToolCalls(this.mcpToolCallBuffer);
+      for (const segment of segments) {
+        if (segment.type === 'text' && segment.text) {
+          events.push(...this._emitTextDelta(segment.text));
+        } else if (segment.type === 'tool_call') {
+          const toolBlock = {
+            type: 'tool_use',
+            id: generateToolUseId(),
+            name: segment.toolCall.toolName,
+            input: segment.toolCall.arguments
+          };
+          events.push(...this._processToolUseBlock(toolBlock));
+        }
+      }
+      this.mcpToolCallBuffer = '';
+    }
 
     // Save current tool use if still in progress
     if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
