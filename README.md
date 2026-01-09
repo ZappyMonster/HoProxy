@@ -140,7 +140,7 @@ Configure OpenCode to use HoProxy with MCP tool call passthrough mode.
 
 ### Supported Tool Call Formats
 
-HoProxy supports two XML formats for tool calls in model responses:
+HoProxy supports three XML formats for tool calls in model responses:
 
 **1. MCP Tool Call Format:**
 ```xml
@@ -165,7 +165,14 @@ HoProxy supports two XML formats for tool calls in model responses:
 </function_calls>
 ```
 
-Both formats are automatically parsed and converted to Anthropic `tool_use` blocks, which are then returned to the client for execution.
+**3. Tool Call JSON Format (OpenCode):**
+```xml
+<tool_call>
+{"name": "Task", "parameters": {"task": "Explore the codebase", "agent": "explorer"}}
+</tool_call>
+```
+
+All formats are automatically parsed and converted to Anthropic `tool_use` blocks, which are then returned to the client for execution.
 
 ### MCP Tool Call Passthrough
 
