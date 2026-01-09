@@ -176,4 +176,83 @@ describe('hopGPTToAnthropic transformer', () => {
       ])
     );
   });
+
+  it('passes through mcp_tool_call blocks in text when mcpPassthrough is enabled', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false,
+      mcpPassthrough: true
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const mcpCall = `<mcp_tool_call>
+<server_name>opencode</server_name>
+<tool_name>Edit</tool_name>
+<arguments>
+{
+  "file_path": "example.ts",
+  "new_string": "line 1\\nline 2\\nline 3"
+}
+</arguments>
+</mcp_tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${mcpCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // In passthrough mode, the mcp_tool_call should remain in text
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).toContain('<mcp_tool_call>');
+    expect(textDeltas).toContain('<tool_name>Edit</tool_name>');
+
+    // No tool_use blocks should be created
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStart).toBeFalsy();
+
+    // Non-streaming response should also preserve the text
+    const response = transformer.buildNonStreamingResponse();
+    const textBlocks = response.content.filter(b => b.type === 'text');
+    expect(textBlocks.length).toBeGreaterThan(0);
+    const fullText = textBlocks.map(b => b.text).join('');
+    expect(fullText).toContain('<mcp_tool_call>');
+
+    // No tool_use in content
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(0);
+  });
 });

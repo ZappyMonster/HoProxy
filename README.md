@@ -134,6 +134,40 @@ Aliases accepted by the proxy include:
 - `claude-sonnet-4-5`, `claude-sonnet-4.5`, `claude-sonnet-4.5-thinking`
 - `claude-haiku-4-5`, `claude-haiku-4.5`, `claude-haiku-4.5-thinking`
 
+## OpenCode Setup
+
+Configure OpenCode to use HoProxy with MCP tool call passthrough mode.
+
+### MCP Tool Call Passthrough
+
+OpenCode parses and executes tool calls directly from `<mcp_tool_call>` XML blocks in the text stream. By default, HoProxy converts these blocks to Anthropic `tool_use` format, which OpenCode doesn't execute.
+
+To enable passthrough mode, use one of these methods:
+
+**Option A: HTTP Header**
+```bash
+curl http://localhost:3001/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-mcp-passthrough: true" \
+  -d '{ ... }'
+```
+
+**Option B: Request metadata**
+```json
+{
+  "model": "claude-sonnet-4-5-thinking",
+  "metadata": {
+    "mcp_passthrough": true
+  },
+  "messages": [...]
+}
+```
+
+When passthrough mode is enabled:
+- `<mcp_tool_call>` blocks remain in the text response for the client to parse
+- No `tool_use` blocks are generated from the XML
+- OpenCode can intercept and execute the tool calls directly
+
 ## Usage
 
 ### With Anthropic SDK (Python)

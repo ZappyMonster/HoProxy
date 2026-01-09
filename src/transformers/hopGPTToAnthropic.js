@@ -209,6 +209,12 @@ export class HopGPTToAnthropicTransformer {
     this.accumulatedToolUses = []; // All completed tool uses
     this.hasToolUse = false;      // Track if response contains tool use
 
+    // MCP tool call passthrough mode - when enabled, <mcp_tool_call> blocks are
+    // passed through as text instead of being converted to tool_use blocks.
+    // This is needed for clients like OpenCode that parse and execute tool calls
+    // directly from the text stream.
+    this.mcpPassthrough = options.mcpPassthrough ?? false;
+
     this.maxTokens = normalizeMaxTokens(options.maxTokens);
     this.stopSequences = normalizeStopSequences(options.stopSequences);
     this.hopGPTStopReason = null;
@@ -339,6 +345,12 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle text blocks
     if (block.type === 'text' && block.text) {
+      // In passthrough mode, don't parse MCP tool calls - just emit text as-is
+      if (this.mcpPassthrough) {
+        events.push(...this._emitTextDelta(block.text));
+        return events.length > 0 ? events : null;
+      }
+
       const combined = `${this.mcpToolCallBuffer}${block.text}`;
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
@@ -382,6 +394,18 @@ export class HopGPTToAnthropicTransformer {
           signature: block.signature || this.thinkingSignature
         });
       } else if (block.type === 'text') {
+        // In passthrough mode, don't parse MCP tool calls - preserve text as-is
+        if (this.mcpPassthrough) {
+          if (block.text) {
+            this.contentBlocks.push({
+              type: 'text',
+              text: block.text
+            });
+            this.accumulatedText += block.text;
+          }
+          continue;
+        }
+
         const segments = splitMcpToolCalls(block.text || '');
         for (const segment of segments) {
           if (segment.type === 'text') {
@@ -434,6 +458,11 @@ export class HopGPTToAnthropicTransformer {
     const events = [];
 
     if (this.blockStarted && this.currentBlockType !== 'text') {
+      // Save tool use before switching away from tool_use block
+      if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
+        this.accumulatedToolUses.push({...this.currentToolUse});
+        this.currentToolUse = null;
+      }
       events.push(this._createBlockStop());
     }
 
