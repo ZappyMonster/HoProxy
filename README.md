@@ -138,11 +138,38 @@ Aliases accepted by the proxy include:
 
 Configure OpenCode to use HoProxy with MCP tool call passthrough mode.
 
+### Supported Tool Call Formats
+
+HoProxy supports two XML formats for tool calls in model responses:
+
+**1. MCP Tool Call Format:**
+```xml
+<mcp_tool_call>
+<server_name>opencode</server_name>
+<tool_name>Edit</tool_name>
+<arguments>
+{"file_path": "example.ts", "new_string": "..."}
+</arguments>
+</mcp_tool_call>
+```
+
+**2. Function Calls Format (OpenCode):**
+```xml
+<function_calls>
+<invoke name="Glob">
+<parameter name="pattern">**/*.ts</parameter>
+</invoke>
+<invoke name="Read">
+<parameter name="file_path">README.md</parameter>
+</invoke>
+</function_calls>
+```
+
+Both formats are automatically parsed and converted to Anthropic `tool_use` blocks, which are then returned to the client for execution.
+
 ### MCP Tool Call Passthrough
 
-OpenCode parses and executes tool calls directly from `<mcp_tool_call>` XML blocks in the text stream. By default, HoProxy converts these blocks to Anthropic `tool_use` format, which OpenCode doesn't execute.
-
-To enable passthrough mode, use one of these methods:
+If your client (like OpenCode) parses and executes tool calls directly from XML blocks in the text stream instead of using Anthropic `tool_use` blocks, enable passthrough mode:
 
 **Option A: HTTP Header**
 ```bash
@@ -164,9 +191,9 @@ curl http://localhost:3001/v1/messages \
 ```
 
 When passthrough mode is enabled:
-- `<mcp_tool_call>` blocks remain in the text response for the client to parse
+- Tool call XML blocks remain in the text response for the client to parse
 - No `tool_use` blocks are generated from the XML
-- OpenCode can intercept and execute the tool calls directly
+- The client can intercept and execute the tool calls directly
 
 ## Usage
 
