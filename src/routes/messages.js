@@ -84,11 +84,19 @@ router.post('/messages', async (req, res) => {
     const systemPrompt = normalizeSystemPrompt(anthropicRequest.system) ??
       normalizeSystemPrompt(conversationState?.systemPrompt ?? conversationState?.system);
 
+    // Check for MCP passthrough mode via header or request metadata
+    // This preserves <mcp_tool_call> blocks in text for clients like OpenCode
+    // that parse and execute tool calls directly from the text stream
+    const mcpPassthrough = req.headers['x-mcp-passthrough'] === 'true' ||
+      anthropicRequest.metadata?.mcp_passthrough === true ||
+      anthropicRequest.metadata?.mcpPassthrough === true;
+
     const transformerOptions = {
       thinkingEnabled: thinkingConfig.enabled,
       maxTokens: hopGPTRequest.max_tokens,
       stopSequences: hopGPTRequest.stop_sequences,
-      systemPrompt
+      systemPrompt,
+      mcpPassthrough
     };
 
     // Determine if streaming
