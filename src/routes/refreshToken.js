@@ -33,14 +33,52 @@ function getTokenExpiryInfo(token) {
       return null;
     }
 
+    const expiresInSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
+    const isExpired = expiresInSeconds <= 0;
+
     return {
       expiresAt: expiresAt.toISOString(),
-      expiresInSeconds: Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000))
+      expiresInSeconds: Math.max(0, expiresInSeconds),
+      isExpired
     };
   } catch (error) {
     return null;
   }
 }
+
+/**
+ * GET /token-status
+ * Get current token expiry status without triggering a refresh
+ */
+router.get('/token-status', (req, res) => {
+  const client = getDefaultClient();
+
+  const bearerTokenInfo = getTokenExpiryInfo(client.bearerToken);
+  const refreshTokenInfo = getTokenExpiryInfo(client.cookies?.refreshToken);
+
+  const status = {
+    bearerToken: bearerTokenInfo ? {
+      ...bearerTokenInfo,
+      present: true
+    } : {
+      present: !!client.bearerToken,
+      isExpired: null,
+      note: client.bearerToken ? 'Token is not a decodable JWT' : 'No bearer token configured'
+    },
+    refreshToken: refreshTokenInfo ? {
+      ...refreshTokenInfo,
+      present: true
+    } : {
+      present: !!client.cookies?.refreshToken,
+      isExpired: null,
+      note: client.cookies?.refreshToken ? 'Token is not a decodable JWT' : 'No refresh token configured'
+    },
+    autoRefresh: client.autoRefresh,
+    timestamp: new Date().toISOString()
+  };
+
+  res.json(status);
+});
 
 /**
  * POST /refresh-token

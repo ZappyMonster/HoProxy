@@ -23,6 +23,8 @@ export class HopGPTClient {
       process.env.HOPGPT_STREAMING_TRANSPORT ||
       'fetch').toLowerCase();
     this.isRefreshing = false;
+    // Proactive refresh buffer: refresh this many seconds before expiration
+    this.proactiveRefreshBufferSec = config.proactiveRefreshBufferSec ?? 60;
 
     // Rate limiting configuration
     this.rateLimitConfig = {
@@ -211,6 +213,81 @@ export class HopGPTClient {
   }
 
   /**
+   * Get expiry info for a JWT token
+   * @param {string} token - JWT token
+   * @returns {object|null} Expiry info or null if not a valid JWT
+   */
+  _getTokenExpiryInfo(token) {
+    if (!token) {
+      return null;
+    }
+
+    const parts = token.split('.');
+    if (parts.length < 2) {
+      return null;
+    }
+
+    try {
+      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
+      const decoded = Buffer.from(paddedPayload, 'base64').toString('utf8');
+      const data = JSON.parse(decoded);
+
+      if (typeof data.exp !== 'number') {
+        return null;
+      }
+
+      const expiresAtMs = data.exp * 1000;
+      const expiresInSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
+
+      return {
+        expiresAtMs,
+        expiresInSeconds,
+        isExpired: expiresInSeconds <= 0
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
+   * Check if bearer token needs proactive refresh
+   * @returns {boolean} True if token should be refreshed
+   */
+  _shouldProactivelyRefresh() {
+    if (!this.autoRefresh || !this.cookies.refreshToken) {
+      return false;
+    }
+
+    const expiryInfo = this._getTokenExpiryInfo(this.bearerToken);
+    if (!expiryInfo) {
+      // If we have no bearer token or can't decode it, try to refresh
+      return !this.bearerToken;
+    }
+
+    // Refresh if token expires within the buffer period
+    return expiryInfo.expiresInSeconds <= this.proactiveRefreshBufferSec;
+  }
+
+  /**
+   * Perform proactive token refresh if needed
+   * @returns {Promise<boolean>} True if tokens are valid (refreshed or already valid)
+   */
+  async ensureValidToken() {
+    if (this._shouldProactivelyRefresh()) {
+      const expiryInfo = this._getTokenExpiryInfo(this.bearerToken);
+      const reason = !this.bearerToken
+        ? 'no bearer token'
+        : expiryInfo?.isExpired
+          ? 'bearer token expired'
+          : `bearer token expires in ${expiryInfo?.expiresInSeconds}s (buffer: ${this.proactiveRefreshBufferSec}s)`;
+      console.log(`[HopGPT] Proactive token refresh triggered: ${reason}`);
+      return await this.refreshTokens();
+    }
+    return true;
+  }
+
+  /**
    * Refresh the bearer token using the refresh token
    * @returns {Promise<boolean>} True if refresh succeeded
    */
@@ -361,6 +438,11 @@ export class HopGPTClient {
     requestOptions = {},
     retryState = { isAuthRetry: false, rateLimitAttempt: 0 }
   ) {
+    // Proactively refresh token if needed (before making the request)
+    if (!retryState.isAuthRetry) {
+      await this.ensureValidToken();
+    }
+
     const url = `${this.baseURL}${this.endpoint}`;
 
     // Detect browser type from User-Agent
