@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { isThinkingModel } from "./hopGPTToAnthropic.js";
+import { prepareMessagesForThinking } from "./thinkingUtils.js";
 
 /**
  * Build a tool injection prompt that tells the model about available tools
@@ -614,6 +615,10 @@ export function transformAnthropicToHopGPT(
 
   // Get thinking configuration
   const thinkingConfig = extractThinkingConfig(anthropicRequest);
+  const processedMessages = prepareMessagesForThinking(messages, {
+    targetFamily: "claude",
+    thinkingEnabled: thinkingConfig.enabled
+  });
   const normalizedSystem = normalizeSystemPrompt(system);
   const stateSystem = normalizeSystemPrompt(
     conversationState?.systemPrompt ?? conversationState?.system
@@ -624,7 +629,7 @@ export function transformAnthropicToHopGPT(
   const isNewConversation = !conversationState?.lastAssistantMessageId;
 
   // Get the latest user message
-  const latestMessage = messages[messages.length - 1];
+  const latestMessage = processedMessages[processedMessages.length - 1];
 
   // Build text content - handle all content block types including tool_result
   let text = "";
@@ -638,9 +643,9 @@ export function transformAnthropicToHopGPT(
     images = extracted.images;
   }
 
-  const shouldIncludeHistory = isNewConversation && messages.length > 1;
+  const shouldIncludeHistory = isNewConversation && processedMessages.length > 1;
   if (shouldIncludeHistory) {
-    text = buildConversationText(messages, systemText);
+    text = buildConversationText(processedMessages, systemText);
   } else if (
     systemText &&
     (isNewConversation || systemChanged || !stateSystem)
