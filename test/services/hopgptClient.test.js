@@ -40,12 +40,6 @@ describe('HopGPTClient', () => {
   });
 
   it('refreshes tokens and retries on auth errors', async () => {
-    const requestResponse = createMockTLSResponse({
-      ok: false,
-      status: 401,
-      statusText: 'Unauthorized',
-      body: 'unauthorized'
-    });
     const refreshResponse = createMockTLSResponse({
       ok: true,
       status: 200,
@@ -54,27 +48,27 @@ describe('HopGPTClient', () => {
         'set-cookie': ['refreshToken=new-refresh; Path=/;']
       }
     });
-    const retryResponse = createMockTLSResponse({
+    const successResponse = createMockTLSResponse({
       ok: true,
       status: 200,
       body: 'data: {"type":"text"}\n\n'
     });
 
-    let callCount = 0;
+    let refreshCalls = 0;
+    let chatCalls = 0;
     tlsFetchSpy.mockImplementation(async (options) => {
-      callCount += 1;
       if (options.url.endsWith('/api/auth/refresh')) {
+        refreshCalls++;
         return refreshResponse;
       }
-      if (callCount === 1) {
-        return requestResponse;
-      }
-      return retryResponse;
+      chatCalls++;
+      return successResponse;
     });
 
+    // Use a non-JWT bearer token to trigger proactive refresh
     const client = new HopGPTClient({
       baseURL: 'https://example.com',
-      bearerToken: 'old-token',
+      bearerToken: 'old-token',  // Non-JWT triggers proactive refresh
       refreshToken: 'refresh-token'
     });
 
@@ -82,7 +76,9 @@ describe('HopGPTClient', () => {
     expect(response.ok).toBe(true);
     expect(client.bearerToken).toBe('new-token');
     expect(client.cookies.refreshToken).toBe('new-refresh');
-    expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
+    // Proactive refresh (1 call) + chat request (1 call) = 2 calls
+    expect(refreshCalls).toBe(1);
+    expect(chatCalls).toBe(1);
   });
 
   it('parses cookies with equals signs in values correctly', async () => {
@@ -152,10 +148,13 @@ describe('HopGPTClient', () => {
         body: 'data: {"type":"text"}\n\n'
       });
 
-      let callCount = 0;
-      tlsFetchSpy.mockImplementation(async () => {
-        callCount += 1;
-        if (callCount === 1) {
+      let chatCalls = 0;
+      tlsFetchSpy.mockImplementation(async (options) => {
+        if (options.url.endsWith('/api/auth/refresh')) {
+          return successResponse;  // Refresh succeeds
+        }
+        chatCalls++;
+        if (chatCalls === 1) {
           return rateLimitResponse;
         }
         return successResponse;
@@ -163,7 +162,7 @@ describe('HopGPTClient', () => {
 
     const client = new HopGPTClient({
       baseURL: 'https://example.com',
-      bearerToken: 'token',
+      bearerToken: 'token',  // Non-JWT triggers proactive refresh
       refreshToken: 'refresh-token',
       rateLimitMaxRetries: 3,
       rateLimitBaseDelayMs: 10  // Use short delay for tests
@@ -172,7 +171,7 @@ describe('HopGPTClient', () => {
 
     const response = await client.sendMessage({ text: 'hello' });
     expect(response.ok).toBe(true);
-    expect(tlsFetchSpy).toHaveBeenCalledTimes(2);
+    expect(chatCalls).toBe(2);  // First fails with 429, second succeeds
     expect(sleepSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -184,12 +183,24 @@ describe('HopGPTClient', () => {
         body: 'rate limited',
         headers: {}
       });
+      const successResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: '{}'
+      });
 
-      tlsFetchSpy.mockResolvedValue(rateLimitResponse);
+      let chatCalls = 0;
+      tlsFetchSpy.mockImplementation(async (options) => {
+        if (options.url.endsWith('/api/auth/refresh')) {
+          return successResponse;  // Refresh succeeds
+        }
+        chatCalls++;
+        return rateLimitResponse;  // Chat always returns 429
+      });
 
     const client = new HopGPTClient({
       baseURL: 'https://example.com',
-      bearerToken: 'token',
+      bearerToken: 'token',  // Non-JWT triggers proactive refresh
       refreshToken: 'refresh-token',
       rateLimitMaxRetries: 2,
       rateLimitBaseDelayMs: 10
@@ -199,8 +210,8 @@ describe('HopGPTClient', () => {
     await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
       'Rate limit retries exhausted. Please try again later.'
     );
-    // Initial attempt + 2 retries = 3 calls
-    expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
+    // Initial attempt + 2 retries = 3 chat calls
+    expect(chatCalls).toBe(3);
     expect(sleepSpy).toHaveBeenCalledTimes(2);
   });
 
@@ -212,12 +223,24 @@ describe('HopGPTClient', () => {
         body: 'rate limited',
         headers: { 'retry-after': '60' }  // 60 seconds
       });
+      const successResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: '{}'
+      });
 
-      tlsFetchSpy.mockResolvedValue(rateLimitResponse);
+      let chatCalls = 0;
+      tlsFetchSpy.mockImplementation(async (options) => {
+        if (options.url.endsWith('/api/auth/refresh')) {
+          return successResponse;  // Refresh succeeds
+        }
+        chatCalls++;
+        return rateLimitResponse;
+      });
 
       const client = new HopGPTClient({
         baseURL: 'https://example.com',
-        bearerToken: 'token',
+        bearerToken: 'token',  // Non-JWT triggers proactive refresh
         refreshToken: 'refresh-token',
         rateLimitMaxRetries: 3,
         rateLimitMaxWaitTimeMs: 10000  // 10 seconds max
@@ -226,8 +249,8 @@ describe('HopGPTClient', () => {
       await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
         'Rate limited. Retry after 60 seconds.'
       );
-      // Should only call once since Retry-After exceeds max wait time
-      expect(tlsFetchSpy).toHaveBeenCalledTimes(1);
+      // Should only call chat once since Retry-After exceeds max wait time
+      expect(chatCalls).toBe(1);
     });
 
     it('extracts numeric Retry-After header', () => {
