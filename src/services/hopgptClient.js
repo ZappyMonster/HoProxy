@@ -203,7 +203,12 @@ export class HopGPTClient {
   _parseCookies(setCookieHeaders) {
     for (const cookieStr of setCookieHeaders) {
       const [cookiePart] = cookieStr.split(';');
-      const [name, value] = cookiePart.split('=');
+      // Split only on the first '=' to preserve '=' characters in the value
+      // (common in base64-encoded tokens like JWTs)
+      const equalsIndex = cookiePart.indexOf('=');
+      if (equalsIndex === -1) continue;
+      const name = cookiePart.substring(0, equalsIndex);
+      const value = cookiePart.substring(equalsIndex + 1);
 
       if (name === 'refreshToken') {
         this.cookies.refreshToken = value;

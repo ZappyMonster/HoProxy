@@ -85,6 +85,32 @@ describe('HopGPTClient', () => {
     expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
   });
 
+  it('parses cookies with equals signs in values correctly', async () => {
+    // JWT tokens and base64 values often contain '=' characters
+    const jwtWithEquals = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.abc123==';
+    const refreshResponse = createMockTLSResponse({
+      ok: true,
+      status: 200,
+      body: JSON.stringify({ token: 'new-bearer-token' }),
+      headers: {
+        'set-cookie': [`refreshToken=${jwtWithEquals}; Path=/; HttpOnly`]
+      }
+    });
+
+    tlsFetchSpy.mockResolvedValue(refreshResponse);
+
+    const client = new HopGPTClient({
+      baseURL: 'https://example.com',
+      refreshToken: 'old-refresh-token',
+      autoPersist: false
+    });
+
+    const refreshed = await client.refreshTokens();
+    expect(refreshed).toBe(true);
+    // The full JWT with trailing '==' should be preserved
+    expect(client.cookies.refreshToken).toBe(jwtWithEquals);
+  });
+
   it('maps HopGPT errors to Anthropic error formats', () => {
     const authError = new HopGPTError(401, 'Unauthorized');
     expect(authError.toAnthropicError()).toEqual({
