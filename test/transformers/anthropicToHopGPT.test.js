@@ -26,6 +26,7 @@ describe('anthropicToHopGPT transformers', () => {
       {
         name: 'search',
         description: 'Search tool',
+        input_schema: { type: 'object', properties: { q: { type: 'string' } } },
         parameters: { type: 'object', properties: { q: { type: 'string' } } }
       }
     ]);

@@ -79,6 +79,7 @@ app.listen(PORT, () => {
 ║    POST /v1/messages  - Anthropic Messages API             ║
 ║    GET  /v1/models    - List available models              ║
 ║    POST /refresh-token - Refresh HopGPT session token      ║
+║    GET  /token-status  - Check token expiry status         ║
 ║    GET  /health       - Health check                       ║
 ║                                                            ║
 ║  Usage with Anthropic SDK:                                 ║
