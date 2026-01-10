@@ -2,6 +2,60 @@ import { v4 as uuidv4 } from "uuid";
 import { isThinkingModel } from "./hopGPTToAnthropic.js";
 
 /**
+ * Build a tool injection prompt that tells the model about available tools
+ * and how to call them using XML format that we can parse.
+ * @param {Array} tools - Anthropic tools array
+ * @param {object} toolChoice - Anthropic tool_choice
+ * @returns {string} Tool injection prompt
+ */
+function buildToolInjectionPrompt(tools, toolChoice) {
+  if (!tools || !Array.isArray(tools) || tools.length === 0) {
+    return '';
+  }
+
+  let prompt = `\n\n# Available Tools\n\nYou have access to the following tools. To use a tool, output a tool call in the following XML format:\n\n<tool_call>\n{"name": "tool_name", "parameters": {"param1": "value1", "param2": "value2"}}\n</tool_call>\n\nIMPORTANT: You MUST use this exact XML format to call tools. Output the <tool_call> block directly in your response - do not describe what you will do, actually call the tool.\n\n## Tool Definitions\n\n`;
+
+  for (const tool of tools) {
+    const schema = tool.input_schema || tool.parameters || { type: 'object', properties: {} };
+    const properties = schema.properties || {};
+    const required = schema.required || [];
+
+    prompt += `### ${tool.name}\n`;
+    if (tool.description) {
+      // Truncate very long descriptions
+      const desc = tool.description.length > 500
+        ? tool.description.slice(0, 500) + '...'
+        : tool.description;
+      prompt += `${desc}\n\n`;
+    }
+
+    if (Object.keys(properties).length > 0) {
+      prompt += `Parameters:\n`;
+      for (const [paramName, paramDef] of Object.entries(properties)) {
+        const reqMark = required.includes(paramName) ? ' (required)' : '';
+        const paramType = paramDef.type || 'any';
+        const paramDesc = paramDef.description ? `: ${paramDef.description.slice(0, 100)}` : '';
+        prompt += `- ${paramName}${reqMark} [${paramType}]${paramDesc}\n`;
+      }
+      prompt += '\n';
+    }
+  }
+
+  // Add tool choice guidance
+  if (toolChoice) {
+    if (toolChoice.type === 'any' || toolChoice === 'any') {
+      prompt += `\nYou MUST use at least one tool in your response.\n`;
+    } else if (toolChoice.type === 'tool' && toolChoice.name) {
+      prompt += `\nYou MUST use the "${toolChoice.name}" tool in your response.\n`;
+    }
+  }
+
+  prompt += `\nWhen you need to perform an action, call the appropriate tool using the XML format shown above. You can call multiple tools if needed. After calling a tool, wait for the result before proceeding.\n`;
+
+  return prompt;
+}
+
+/**
  * Transform Anthropic tool definitions to HopGPT format
  * @param {Array} tools - Anthropic tools array
  * @returns {Array} HopGPT tools array
@@ -299,6 +353,13 @@ export function transformAnthropicToHopGPT(
     (isNewConversation || systemChanged || !stateSystem)
   ) {
     text = text ? `${systemText}\n\n${text}` : systemText;
+  }
+
+  // Inject tool definitions into the prompt if tools are provided
+  // This is necessary because HopGPT doesn't pass tools to the model natively
+  const toolInjection = buildToolInjectionPrompt(tools, tool_choice);
+  if (toolInjection) {
+    text = text + toolInjection;
   }
 
   // Get parent message ID for conversation threading

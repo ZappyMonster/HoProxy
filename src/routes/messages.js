@@ -105,6 +105,9 @@ router.post('/messages', async (req, res) => {
       console.log('[Messages] mcpPassthrough:', mcpPassthrough);
       console.log('[Messages] streaming:', anthropicRequest.stream === true);
       console.log('[Messages] tools count:', anthropicRequest.tools?.length || 0);
+      if (anthropicRequest.tools?.length > 0) {
+        console.log('[Messages] Tools injected into prompt for model to use');
+      }
     }
 
     const transformerOptions = {

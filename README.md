@@ -137,7 +137,18 @@ Aliases accepted by the proxy include:
 
 ## OpenCode Setup
 
-OpenCode supports the Anthropic tool use protocol. When HopGPT outputs XML-formatted tool calls in its text response, HoProxy automatically parses and converts them to standard Anthropic `tool_use` blocks that OpenCode can execute.
+OpenCode supports the Anthropic tool use protocol. HoProxy handles the full tool use flow:
+
+1. **Tool Injection**: When tools are sent in the Anthropic request, HoProxy injects tool definitions into the prompt so the model knows how to call them
+2. **XML Parsing**: When the model outputs XML-formatted tool calls (e.g., `<tool_call>`), HoProxy parses them and converts to standard Anthropic `tool_use` blocks
+3. **Result Handling**: OpenCode executes the tools and sends `tool_result` messages back
+
+### How Tool Injection Works
+
+Since HopGPT doesn't natively pass Anthropic tools to the Claude model, HoProxy injects a tool prompt that:
+- Describes all available tools and their parameters
+- Instructs the model to output tool calls in `<tool_call>` XML format
+- The XML is then parsed and converted to Anthropic `tool_use` blocks
 
 ### Supported Tool Call Formats
 
