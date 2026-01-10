@@ -118,6 +118,7 @@ export ANTHROPIC_MODEL=claude-sonnet-4-5-thinking
 - **`authentication_error` from HoProxy**: Your HopGPT cookies/tokens are missing or expired. Re-run `npm run extract` and restart the server.
 - **401/403 from HopGPT**: The refresh token likely expired; re-authenticate and re-extract credentials.
 - **Cloudflare "Attention Required" page**: Your Cloudflare cookies or user agent are missing/expired. Re-run `npm run extract` and restart the server.
+- **Streaming output arrives all at once**: Ensure `HOPGPT_STREAMING_TRANSPORT=fetch` (default). If Cloudflare blocks streaming with native fetch, set `HOPGPT_STREAMING_TRANSPORT=tls` to fall back to non-streaming TLS.
 - **Model warning or not found**: Use a supported model from the list below or call `GET /v1/models`.
 - **Claude Code still calling Anthropic**: Confirm `ANTHROPIC_BASE_URL` is set and restart Claude Code.
 

@@ -12,8 +12,11 @@ const FUNCTION_CALLS_START_TAG = '<function_calls>';
 const TOOL_CALL_JSON_BLOCK_RE = /<tool_call>[\s\S]*?<\/tool_call>/gi;
 const TOOL_CALL_JSON_START_TAG = '<tool_call>';
 
+// Pattern for <tool_use> blocks with JSON-like content (Anthropic style in text)
+const TOOL_USE_START_TAG = '<tool_use';
+
 // Combined pattern for any tool call format
-const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>|<function_calls>[\s\S]*?<\/function_calls>|<tool_call>[\s\S]*?<\/tool_call>)/gi;
+const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call>[\s\S]*?<\/mcp_tool_call>|<function_calls>[\s\S]*?<\/function_calls>|<tool_call>[\s\S]*?<\/tool_call>|<tool_use[\s\S]*?<\/tool_use>)/gi;
 
 function extractXmlTagValue(source, tagName) {
   if (!source) {
@@ -31,6 +34,15 @@ function extractXmlAttribute(source, tagName, attrName) {
   const matcher = new RegExp(`<${tagName}[^>]*\\s${attrName}=["']([^"']*)["']`, 'i');
   const match = source.match(matcher);
   return match ? match[1] : null;
+}
+
+function extractXmlTagContent(source, tagName) {
+  if (!source) {
+    return null;
+  }
+  const matcher = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+  const match = source.match(matcher);
+  return match ? match[1].trim() : null;
 }
 
 function parseMcpToolCallBlock(block) {
@@ -131,6 +143,36 @@ function parseToolCallJsonBlock(block) {
 }
 
 /**
+ * Parse <tool_use> block with JSON content
+ * Format: <tool_use id="toolu_x" name="ToolName">{...}</tool_use>
+ */
+function parseToolUseBlock(block) {
+  const toolName = extractXmlAttribute(block, 'tool_use', 'name');
+  if (!toolName) {
+    return null;
+  }
+
+  const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
+  const inputText = extractXmlTagContent(block, 'tool_use');
+  let parsedArgs = {};
+
+  if (inputText && inputText.length > 0) {
+    try {
+      parsedArgs = JSON.parse(inputText.trim());
+    } catch (error) {
+      parsedArgs = inputText.trim();
+    }
+  }
+
+  return {
+    serverName: null,
+    toolName,
+    toolUseId,
+    arguments: parsedArgs
+  };
+}
+
+/**
  * Parse any tool call block format and return array of tool calls
  */
 function parseAnyToolCallBlock(block) {
@@ -144,6 +186,10 @@ function parseAnyToolCallBlock(block) {
   }
   if (blockLower.includes('<tool_call>')) {
     const toolCall = parseToolCallJsonBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
+  if (blockLower.includes('<tool_use')) {
+    const toolCall = parseToolUseBlock(block);
     return toolCall ? [toolCall] : [];
   }
   return [];
@@ -165,8 +211,13 @@ function splitMcpToolCalls(text) {
       segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
     }
     const toolCalls = parseAnyToolCallBlock(match[0]);
-    for (const toolCall of toolCalls) {
-      segments.push({ type: 'tool_call', toolCall });
+    if (toolCalls.length === 0) {
+      // Fallback: emit the original text if parsing failed
+      segments.push({ type: 'text', text: match[0] });
+    } else {
+      for (const toolCall of toolCalls) {
+        segments.push({ type: 'tool_call', toolCall });
+      }
     }
     lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
   }
@@ -190,8 +241,13 @@ function splitStreamTextForMcpToolCalls(text) {
       segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
     }
     const toolCalls = parseAnyToolCallBlock(match[0]);
-    for (const toolCall of toolCalls) {
-      segments.push({ type: 'tool_call', toolCall });
+    if (toolCalls.length === 0) {
+      // Fallback: emit the original text if parsing failed
+      segments.push({ type: 'text', text: match[0] });
+    } else {
+      for (const toolCall of toolCalls) {
+        segments.push({ type: 'tool_call', toolCall });
+      }
     }
     lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
   }
@@ -205,10 +261,11 @@ function splitStreamTextForMcpToolCalls(text) {
   const mcpStartIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
   const funcStartIndex = trailing.indexOf(FUNCTION_CALLS_START_TAG);
   const toolCallStartIndex = trailing.indexOf(TOOL_CALL_JSON_START_TAG);
+  const toolUseStartIndex = trailing.indexOf(TOOL_USE_START_TAG);
 
   // Find the earliest partial tag
   let startIndex = -1;
-  const indices = [mcpStartIndex, funcStartIndex, toolCallStartIndex].filter(i => i !== -1);
+  const indices = [mcpStartIndex, funcStartIndex, toolCallStartIndex, toolUseStartIndex].filter(i => i !== -1);
   if (indices.length > 0) {
     startIndex = Math.min(...indices);
   }
@@ -226,7 +283,8 @@ function splitStreamTextForMcpToolCalls(text) {
     const possibleTag = trailing.slice(lastLt);
     if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag) ||
         FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
-        TOOL_CALL_JSON_START_TAG.startsWith(possibleTag)) {
+        TOOL_CALL_JSON_START_TAG.startsWith(possibleTag) ||
+        TOOL_USE_START_TAG.startsWith(possibleTag)) {
       if (lastLt > 0) {
         segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
       }
@@ -489,7 +547,8 @@ export class HopGPTToAnthropicTransformer {
       if (process.env.HOPGPT_DEBUG === 'true') {
         const hasToolCallTag = block.text.includes('<tool_call>') ||
                                block.text.includes('<function_calls>') ||
-                               block.text.includes('<mcp_tool_call>');
+                               block.text.includes('<mcp_tool_call>') ||
+                               block.text.includes('<tool_use');
         if (hasToolCallTag) {
           console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
         }
@@ -518,7 +577,7 @@ export class HopGPTToAnthropicTransformer {
         if (segment.type === 'tool_call') {
           const toolBlock = {
             type: 'tool_use',
-            id: generateToolUseId(),
+            id: segment.toolCall.toolUseId || generateToolUseId(),
             name: segment.toolCall.toolName,
             input: segment.toolCall.arguments
           };
@@ -576,7 +635,7 @@ export class HopGPTToAnthropicTransformer {
             this.hasToolUse = true;
             this.contentBlocks.push({
               type: 'tool_use',
-              id: generateToolUseId(),
+              id: segment.toolCall.toolUseId || generateToolUseId(),
               name: segment.toolCall.toolName,
               input: segment.toolCall.arguments || {}
             });
@@ -847,8 +906,7 @@ export class HopGPTToAnthropicTransformer {
           content_block: {
             type: 'tool_use',
             id: toolUseInfo?.id || generateToolUseId(),
-            name: toolUseInfo?.name || '',
-            input: {}
+            name: toolUseInfo?.name || ''
           }
         }
       });
@@ -931,7 +989,7 @@ export class HopGPTToAnthropicTransformer {
         } else if (segment.type === 'tool_call') {
           const toolBlock = {
             type: 'tool_use',
-            id: generateToolUseId(),
+            id: segment.toolCall.toolUseId || generateToolUseId(),
             name: segment.toolCall.toolName,
             input: segment.toolCall.arguments
           };

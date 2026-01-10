@@ -55,6 +55,9 @@ export async function pipeSSEStream(fetchResponse, res, transformEvent) {
         for (const evt of events) {
           res.write(`event: ${evt.event}\n`);
           res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+          if (typeof res.flush === 'function') {
+            res.flush();
+          }
         }
       }
     }

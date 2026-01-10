@@ -78,6 +78,15 @@ router.post('/messages', async (req, res) => {
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest, conversationState);
     hopGPTRequest.model = modelMapping.hopgptModel || hopGPTRequest.model;
 
+    // Debug logging for transformed request
+    if (process.env.HOPGPT_DEBUG === 'true') {
+      console.log('[Messages] Transformed model:', hopGPTRequest.model);
+      if (hopGPTRequest.tools) {
+        console.log('[Messages] Transformed tools count:', hopGPTRequest.tools.length);
+        console.log('[Messages] First tool sample:', JSON.stringify(hopGPTRequest.tools[0], null, 2));
+      }
+    }
+
     // Extract thinking configuration for response transformer
     const thinkingConfig = extractThinkingConfig(anthropicRequest);
 
@@ -142,7 +151,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
   res.flushHeaders();
 
   try {
-    const hopGPTResponse = await client.sendMessage(hopGPTRequest);
+    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
 
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
@@ -171,7 +180,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
  */
 async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res) {
   try {
-    const hopGPTResponse = await client.sendMessage(hopGPTRequest);
+    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: false });
 
     // Process all events to accumulate the full response
     await parseSSEStream(hopGPTResponse, (event) => {
