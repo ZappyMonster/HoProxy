@@ -4,7 +4,7 @@ import { isThinkingModel } from "./hopGPTToAnthropic.js";
 /**
  * Build a tool injection prompt that tells the model about available tools
  * and how to call them using XML format that we can parse.
- * @param {Array} tools - Anthropic tools array
+ * @param {Array} tools - Normalized tools array
  * @param {object} toolChoice - Anthropic tool_choice
  * @returns {string} Tool injection prompt
  */
@@ -18,7 +18,7 @@ function buildToolInjectionPrompt(tools, toolChoice) {
   for (const tool of tools) {
     const schema = tool.input_schema || tool.parameters || { type: 'object', properties: {} };
     const properties = schema.properties || {};
-    const required = schema.required || [];
+    const required = Array.isArray(schema.required) ? schema.required : [];
 
     prompt += `### ${tool.name}\n`;
     if (tool.description) {
@@ -33,7 +33,7 @@ function buildToolInjectionPrompt(tools, toolChoice) {
       prompt += `Parameters:\n`;
       for (const [paramName, paramDef] of Object.entries(properties)) {
         const reqMark = required.includes(paramName) ? ' (required)' : '';
-        const paramType = paramDef.type || 'any';
+        const paramType = describeSchemaType(paramDef);
         const paramDesc = paramDef.description ? `: ${paramDef.description.slice(0, 100)}` : '';
         prompt += `- ${paramName}${reqMark} [${paramType}]${paramDesc}\n`;
       }
@@ -45,8 +45,9 @@ function buildToolInjectionPrompt(tools, toolChoice) {
   if (toolChoice) {
     if (toolChoice.type === 'any' || toolChoice === 'any') {
       prompt += `\nYou MUST use at least one tool in your response.\n`;
-    } else if (toolChoice.type === 'tool' && toolChoice.name) {
-      prompt += `\nYou MUST use the "${toolChoice.name}" tool in your response.\n`;
+    } else if ((toolChoice.type === 'tool' || toolChoice.type === 'function') && (toolChoice.name || toolChoice.function?.name)) {
+      const forcedName = toolChoice.name || toolChoice.function?.name;
+      prompt += `\nYou MUST use the "${forcedName}" tool in your response.\n`;
     }
   }
 
@@ -55,21 +56,306 @@ function buildToolInjectionPrompt(tools, toolChoice) {
   return prompt;
 }
 
+const DEFAULT_TOOL_SCHEMA = {
+  type: "object",
+  properties: {},
+  required: []
+};
+
+function normalizeSchemaType(type, schema) {
+  if (Array.isArray(type)) {
+    const filtered = type.filter((value) => value && value !== "null");
+    return filtered.length > 0 ? filtered[0] : null;
+  }
+  if (typeof type === "string") {
+    return type;
+  }
+  if (schema?.properties) {
+    return "object";
+  }
+  if (schema?.items) {
+    return "array";
+  }
+  return null;
+}
+
+function scoreSchemaOption(schema) {
+  if (!schema || typeof schema !== "object") {
+    return -1;
+  }
+
+  const type = normalizeSchemaType(schema.type, schema);
+  let score = 0;
+
+  if (type === "object" || schema.properties) {
+    score += 5;
+  }
+
+  if (schema.properties && typeof schema.properties === "object") {
+    score += Math.min(Object.keys(schema.properties).length, 10);
+  }
+
+  if (Array.isArray(schema.required)) {
+    score += Math.min(schema.required.length, 5);
+  }
+
+  if (schema.description) {
+    score += 1;
+  }
+
+  if (Array.isArray(schema.enum)) {
+    score += Math.min(schema.enum.length, 3);
+  }
+
+  return score;
+}
+
+function pickBestSchemaOption(options) {
+  let best = null;
+  let bestScore = -1;
+
+  for (const option of options) {
+    const score = scoreSchemaOption(option);
+    if (score > bestScore) {
+      bestScore = score;
+      best = option;
+    }
+  }
+
+  return best || options[0] || null;
+}
+
+function mergeSchemas(baseSchema, extraSchema) {
+  const base = baseSchema && typeof baseSchema === "object" ? baseSchema : {};
+  const extra = extraSchema && typeof extraSchema === "object" ? extraSchema : {};
+
+  const merged = { ...base, ...extra };
+
+  const baseProps = base.properties && typeof base.properties === "object" ? base.properties : {};
+  const extraProps = extra.properties && typeof extra.properties === "object" ? extra.properties : {};
+  merged.properties = { ...baseProps, ...extraProps };
+
+  const required = new Set();
+  if (Array.isArray(base.required)) {
+    base.required.forEach((item) => required.add(item));
+  }
+  if (Array.isArray(extra.required)) {
+    extra.required.forEach((item) => required.add(item));
+  }
+  if (required.size > 0) {
+    merged.required = Array.from(required);
+  }
+
+  return merged;
+}
+
+function resolveSchema(schema, depth = 0) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return null;
+  }
+
+  if (depth > 6) {
+    return schema;
+  }
+
+  if (schema.$ref && !schema.properties && !schema.items && !schema.allOf && !schema.anyOf && !schema.oneOf) {
+    const description = schema.description
+      ? `${schema.description} (ref: ${schema.$ref})`
+      : `Schema reference: ${schema.$ref}`;
+    return { type: schema.type || "string", description };
+  }
+
+  if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
+    const base = { ...schema };
+    delete base.allOf;
+    let merged = base;
+    for (const option of schema.allOf) {
+      merged = mergeSchemas(merged, option);
+    }
+    return resolveSchema(merged, depth + 1);
+  }
+
+  if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+    const base = { ...schema };
+    delete base.anyOf;
+    const best = pickBestSchemaOption(schema.anyOf);
+    return resolveSchema(mergeSchemas(base, best), depth + 1);
+  }
+
+  if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+    const base = { ...schema };
+    delete base.oneOf;
+    const best = pickBestSchemaOption(schema.oneOf);
+    return resolveSchema(mergeSchemas(base, best), depth + 1);
+  }
+
+  return schema;
+}
+
+function sanitizeSchemaNode(schema, depth = 0) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return {};
+  }
+
+  if (depth > 6) {
+    return {};
+  }
+
+  const resolved = resolveSchema(schema, depth);
+  if (!resolved || typeof resolved !== "object") {
+    return {};
+  }
+
+  const node = {};
+  const type = normalizeSchemaType(resolved.type, resolved);
+  if (type) {
+    node.type = type;
+  }
+
+  if (typeof resolved.description === "string") {
+    node.description = resolved.description;
+  }
+
+  if (Array.isArray(resolved.enum)) {
+    node.enum = resolved.enum;
+  }
+
+  if (resolved.items) {
+    node.items = sanitizeSchemaNode(resolved.items, depth + 1);
+  }
+
+  if (resolved.properties && typeof resolved.properties === "object") {
+    node.type = node.type || "object";
+    node.properties = {};
+    for (const [key, value] of Object.entries(resolved.properties)) {
+      node.properties[key] = sanitizeSchemaNode(value, depth + 1);
+    }
+
+    if (Array.isArray(resolved.required)) {
+      node.required = resolved.required.filter((item) => typeof item === "string");
+    }
+  }
+
+  if (resolved.additionalProperties !== undefined) {
+    node.additionalProperties = typeof resolved.additionalProperties === "boolean"
+      ? resolved.additionalProperties
+      : sanitizeSchemaNode(resolved.additionalProperties, depth + 1);
+  }
+
+  return node;
+}
+
+function sanitizeToolSchema(schema) {
+  const sanitized = sanitizeSchemaNode(schema);
+  const normalized = { ...DEFAULT_TOOL_SCHEMA, ...sanitized };
+
+  if (!normalized.properties || typeof normalized.properties !== "object") {
+    normalized.properties = {};
+  }
+
+  if (!Array.isArray(normalized.required)) {
+    normalized.required = [];
+  }
+
+  if (normalized.type !== "object" && Object.keys(normalized.properties).length === 0) {
+    return {
+      type: "object",
+      properties: {
+        input: sanitized.type ? sanitized : { type: "string" }
+      },
+      required: []
+    };
+  }
+
+  normalized.type = "object";
+  return normalized;
+}
+
+function normalizeToolDefinition(tool, index) {
+  if (!tool || typeof tool !== "object") {
+    return null;
+  }
+
+  const functionTool = tool.function || tool.custom || null;
+  const rawName = tool.name || functionTool?.name || tool.custom?.name;
+  const name = typeof rawName === "string" && rawName.trim().length > 0
+    ? rawName.trim()
+    : `tool-${index + 1}`;
+  const description = tool.description || functionTool?.description || tool.custom?.description || "";
+  const rawSchema = tool.input_schema ||
+    tool.parameters ||
+    functionTool?.input_schema ||
+    functionTool?.parameters ||
+    tool.custom?.input_schema ||
+    tool.custom?.parameters;
+
+  return {
+    name: String(name),
+    description: typeof description === "string" ? description : "",
+    input_schema: sanitizeToolSchema(rawSchema)
+  };
+}
+
+function normalizeToolDefinitions(tools) {
+  if (!Array.isArray(tools)) {
+    return [];
+  }
+
+  const normalized = [];
+  tools.forEach((tool, index) => {
+    const resolved = normalizeToolDefinition(tool, index);
+    if (resolved) {
+      normalized.push(resolved);
+    }
+  });
+
+  return normalized;
+}
+
+function describeSchemaType(schema) {
+  if (!schema || typeof schema !== "object") {
+    return "any";
+  }
+
+  if (Array.isArray(schema.type)) {
+    return schema.type.join(" | ");
+  }
+
+  if (typeof schema.type === "string") {
+    return schema.type;
+  }
+
+  if (schema.enum) {
+    return "enum";
+  }
+
+  if (schema.properties) {
+    return "object";
+  }
+
+  if (schema.items) {
+    return "array";
+  }
+
+  return "any";
+}
+
 /**
  * Transform Anthropic tool definitions to HopGPT format
  * @param {Array} tools - Anthropic tools array
  * @returns {Array} HopGPT tools array
  */
 export function transformTools(tools) {
-  if (!tools || !Array.isArray(tools)) {
+  const normalizedTools = normalizeToolDefinitions(tools);
+  if (normalizedTools.length === 0) {
     return null;
   }
 
-  return tools.map((tool) => ({
+  return normalizedTools.map((tool) => ({
     name: tool.name,
     description: tool.description || "",
-    input_schema: tool.input_schema || { type: "object", properties: {} },
-    parameters: tool.input_schema || { type: "object", properties: {} },
+    input_schema: tool.input_schema,
+    parameters: tool.input_schema
   }));
 }
 
@@ -91,6 +377,9 @@ export function transformToolChoice(toolChoice) {
     if (toolChoice === "any") {
       return { type: "required" };
     }
+    if (toolChoice === "required") {
+      return { type: "required" };
+    }
     if (toolChoice === "none") {
       return { type: "none" };
     }
@@ -106,6 +395,9 @@ export function transformToolChoice(toolChoice) {
     }
     if (toolChoice.type === "tool") {
       return { type: "function", function: { name: toolChoice.name } };
+    }
+    if (toolChoice.type === "function" && toolChoice.function?.name) {
+      return { type: "function", function: { name: toolChoice.function.name } };
     }
   }
 
@@ -318,6 +610,7 @@ export function transformAnthropicToHopGPT(
   } = anthropicRequest;
   const imageDetail = "high";
   const toolCallStopSequence = "</mcp_tool_call>";
+  const normalizedTools = normalizeToolDefinitions(tools);
 
   // Get thinking configuration
   const thinkingConfig = extractThinkingConfig(anthropicRequest);
@@ -357,7 +650,7 @@ export function transformAnthropicToHopGPT(
 
   // Inject tool definitions into the prompt if tools are provided
   // This is necessary because HopGPT doesn't pass tools to the model natively
-  const toolInjection = buildToolInjectionPrompt(tools, tool_choice);
+  const toolInjection = buildToolInjectionPrompt(normalizedTools, tool_choice);
   if (toolInjection) {
     text = text + toolInjection;
   }
@@ -413,7 +706,7 @@ export function transformAnthropicToHopGPT(
   hopGPTRequest.stop_sequences = stopSequences;
 
   // Add tools if provided
-  const transformedTools = transformTools(tools);
+  const transformedTools = transformTools(normalizedTools);
   if (transformedTools) {
     hopGPTRequest.tools = transformedTools;
   }
