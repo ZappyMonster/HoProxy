@@ -1,4 +1,6 @@
 import { tlsFetch } from './tlsClient.js';
+import fs from 'fs';
+import path from 'path';
 
 /**
  * HopGPT API Client
@@ -25,6 +27,10 @@ export class HopGPTClient {
     this.isRefreshing = false;
     // Proactive refresh buffer: refresh this many seconds before expiration
     this.proactiveRefreshBufferSec = config.proactiveRefreshBufferSec ?? 60;
+    
+    // Auto-persist credentials to .env after refresh
+    this.autoPersist = config.autoPersist !== false;
+    this.envPath = config.envPath || path.join(process.cwd(), '.env');
 
     // Rate limiting configuration
     this.rateLimitConfig = {
@@ -213,6 +219,81 @@ export class HopGPTClient {
   }
 
   /**
+   * Persist current credentials to .env file
+   * Updates only the token-related variables, preserving other settings
+   */
+  persistCredentials() {
+    if (!this.autoPersist) {
+      return;
+    }
+
+    try {
+      let existingContent = '';
+      const preservedLines = [];
+
+      // Variables we will update
+      const tokenVars = new Set([
+        'HOPGPT_BEARER_TOKEN',
+        'HOPGPT_COOKIE_REFRESH_TOKEN'
+      ]);
+
+      // Read existing .env if it exists
+      if (fs.existsSync(this.envPath)) {
+        existingContent = fs.readFileSync(this.envPath, 'utf-8');
+
+        for (const line of existingContent.split('\n')) {
+          const trimmed = line.trim();
+
+          // Check if this line sets a token variable we want to update
+          const isTokenVar = Array.from(tokenVars).some(v =>
+            trimmed.startsWith(`${v}=`) || trimmed.startsWith(`# ${v}=`)
+          );
+
+          if (!isTokenVar) {
+            preservedLines.push(line);
+          }
+        }
+      }
+
+      // Build new token lines
+      const tokenLines = [];
+      if (this.bearerToken) {
+        tokenLines.push(`HOPGPT_BEARER_TOKEN=${this.bearerToken}`);
+      }
+      if (this.cookies.refreshToken) {
+        tokenLines.push(`HOPGPT_COOKIE_REFRESH_TOKEN=${this.cookies.refreshToken}`);
+      }
+
+      // Find where to insert token lines (after header comments, before other content)
+      let insertIndex = 0;
+      for (let i = 0; i < preservedLines.length; i++) {
+        const line = preservedLines[i].trim();
+        if (line.startsWith('#') || line === '') {
+          insertIndex = i + 1;
+        } else {
+          break;
+        }
+      }
+
+      // Insert token lines
+      preservedLines.splice(insertIndex, 0, ...tokenLines);
+
+      // Ensure file ends with newline
+      let finalContent = preservedLines.join('\n');
+      if (!finalContent.endsWith('\n')) {
+        finalContent += '\n';
+      }
+
+      // Write back to .env
+      fs.writeFileSync(this.envPath, finalContent);
+
+      console.log('[HopGPT] Credentials persisted to .env');
+    } catch (error) {
+      console.error('[HopGPT] Failed to persist credentials:', error.message);
+    }
+  }
+
+  /**
    * Get expiry info for a JWT token
    * @param {string} token - JWT token
    * @returns {object|null} Expiry info or null if not a valid JWT
@@ -351,7 +432,16 @@ export class HopGPTClient {
       }
 
       // Update cookies from Set-Cookie headers (includes rotated refresh token)
+      const oldRefreshToken = this.cookies.refreshToken;
       this.updateCookiesFromTLSResponse(response.headers);
+
+      // Check if refresh token was rotated
+      if (this.cookies.refreshToken && this.cookies.refreshToken !== oldRefreshToken) {
+        console.log('[HopGPT] Refresh token was rotated by server');
+      }
+
+      // Persist new credentials to .env so they survive server restarts
+      this.persistCredentials();
 
       return true;
     } catch (error) {
