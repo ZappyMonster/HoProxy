@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
+import { cacheThinkingSignature, cacheToolSignature } from './signatureCache.js';
 
 // Pattern for <mcp_tool_call> blocks
 const MCP_TOOL_CALL_BLOCK_RE = /<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>/gi;
@@ -500,6 +501,7 @@ export class HopGPTToAnthropicTransformer {
         // Also check for thoughtSignature in the delta
         if (data.data?.delta?.thoughtSignature) {
           this.thinkingSignature = data.data.delta.thoughtSignature;
+          cacheThinkingSignature(this.thinkingSignature, 'claude');
         }
 
         return events.length > 0 ? events : null;
@@ -525,6 +527,7 @@ export class HopGPTToAnthropicTransformer {
       // Check for thoughtSignature in final response
       if (data.responseMessage?.thoughtSignature) {
         this.thinkingSignature = data.responseMessage.thoughtSignature;
+        cacheThinkingSignature(this.thinkingSignature, 'claude');
       }
 
       // Extract content blocks from final message for non-streaming
@@ -574,6 +577,7 @@ export class HopGPTToAnthropicTransformer {
       // Capture signature if present
       if (block.signature) {
         this.thinkingSignature = block.signature;
+        cacheThinkingSignature(this.thinkingSignature, 'claude');
       }
 
       return events;
@@ -634,6 +638,9 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle tool_use blocks
     if (block.type === 'tool_use') {
+      if (block.thoughtSignature && block.id) {
+        cacheToolSignature(block.id, block.thoughtSignature);
+      }
       return this._processToolUseBlock(block);
     }
 
@@ -646,6 +653,9 @@ export class HopGPTToAnthropicTransformer {
   _extractFinalContent(content) {
     for (const block of content) {
       if (block.type === 'thinking') {
+        if (block.signature) {
+          cacheThinkingSignature(block.signature, 'claude');
+        }
         this.contentBlocks.push({
           type: 'thinking',
           thinking: block.thinking || this.accumulatedThinking,
