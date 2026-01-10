@@ -177,6 +177,64 @@ describe('hopGPTToAnthropic transformer', () => {
     );
   });
 
+  it('handles mcp_tool_call blocks without arguments', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const mcpCall = `<mcp_tool_call>
+<server_name>opencode</server_name>
+<tool_name>List</tool_name>
+</mcp_tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${mcpCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).not.toContain('<mcp_tool_call>');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('List');
+    expect(toolUseBlocks[0].input).toEqual({});
+  });
+
   it('passes through mcp_tool_call blocks in text when mcpPassthrough is enabled', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false,
@@ -334,6 +392,64 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(response.stop_reason).toBe('tool_use');
   });
 
+  it('extracts standalone invoke blocks from text and emits tool_use', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const invokeCall = `<invoke name="Read">
+<parameter name="file_path">README.md</parameter>
+</invoke>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${invokeCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).not.toContain('<invoke');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Read');
+    expect(toolUseBlocks[0].input).toEqual({ file_path: 'README.md' });
+    expect(response.stop_reason).toBe('tool_use');
+  });
+
   it('extracts tool_call JSON blocks from text and emits tool_use', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false
@@ -404,6 +520,64 @@ describe('hopGPTToAnthropic transformer', () => {
       task: 'Explore the codebase',
       agent: 'codebase_explorer'
     });
+    expect(response.stop_reason).toBe('tool_use');
+  });
+
+  it('extracts tool_call JSON blocks with attributes from text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolCall = `<tool_call id="call_1">
+{"name": "Read", "parameters": {"path": "README.md"}}
+</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${toolCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).not.toContain('<tool_call');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Read');
+    expect(toolUseBlocks[0].input).toEqual({ path: 'README.md' });
     expect(response.stop_reason).toBe('tool_use');
   });
 
