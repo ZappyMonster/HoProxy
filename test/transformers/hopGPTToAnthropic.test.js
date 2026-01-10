@@ -406,4 +406,73 @@ describe('hopGPTToAnthropic transformer', () => {
     });
     expect(response.stop_reason).toBe('tool_use');
   });
+
+  it('extracts tool_use XML blocks from text and emits tool_use', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolUse = `<tool_use id="toolu_test" name="read">
+{
+  "file_path": "README.md"
+}
+</tool_use>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${toolUse} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).not.toContain('<tool_use');
+
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use' &&
+      evt.data?.content_block?.name === 'read'
+    );
+    expect(toolStart).toBeTruthy();
+    expect(toolStart.data.content_block.id).toBe('toolu_test');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].id).toBe('toolu_test');
+    expect(toolUseBlocks[0].name).toBe('read');
+    expect(toolUseBlocks[0].input).toEqual({ file_path: 'README.md' });
+    expect(response.stop_reason).toBe('tool_use');
+  });
 });

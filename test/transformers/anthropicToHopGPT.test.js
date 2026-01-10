@@ -118,4 +118,27 @@ describe('anthropicToHopGPT transformers', () => {
 
     expect(systemPrompt).toBe('Line 1\nLine 2');
   });
+
+  it('always appends mcp tool call stop sequence', () => {
+    const request = {
+      model: 'claude-sonnet-4-5-thinking',
+      messages: [{ role: 'user', content: 'Hello' }]
+    };
+
+    const result = transformAnthropicToHopGPT(request);
+
+    expect(result.stop_sequences).toEqual(['</mcp_tool_call>']);
+  });
+
+  it('treats stop as an alias for stop_sequences and appends mcp stop', () => {
+    const request = {
+      model: 'claude-sonnet-4-5-thinking',
+      messages: [{ role: 'user', content: 'Hello' }],
+      stop: ['<end>']
+    };
+
+    const result = transformAnthropicToHopGPT(request);
+
+    expect(result.stop_sequences).toEqual(['<end>', '</mcp_tool_call>']);
+  });
 });

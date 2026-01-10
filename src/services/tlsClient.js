@@ -176,6 +176,14 @@ function getStatusText(status) {
   return statusTexts[status] || 'Unknown';
 }
 
+
+// Handle Ctrl+C (SIGINT) explicitly
+process.on('SIGINT', async () => {
+  console.log('\n[TLS Client] Received SIGINT. Shutting down...');
+  await shutdownTLS();
+  process.exit(0);
+});
+
 // Register shutdown handler for clean exit
 process.on('beforeExit', async () => {
   await shutdownTLS();

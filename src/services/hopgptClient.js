@@ -19,6 +19,9 @@ export class HopGPTClient {
       token_provider: config.tokenProvider || process.env.HOPGPT_COOKIE_TOKEN_PROVIDER || 'librechat'
     };
     this.autoRefresh = config.autoRefresh !== false;
+    this.streamingTransport = (config.streamingTransport ||
+      process.env.HOPGPT_STREAMING_TRANSPORT ||
+      'fetch').toLowerCase();
     this.isRefreshing = false;
 
     // Rate limiting configuration
@@ -36,7 +39,13 @@ export class HopGPTClient {
    * @returns {number|null} Delay in milliseconds, or null if not present
    */
   _extractRetryAfter(headers) {
-    const retryAfter = headers['retry-after'] || headers['Retry-After'];
+    if (!headers) {
+      return null;
+    }
+
+    const retryAfter = typeof headers.get === 'function'
+      ? headers.get('retry-after')
+      : headers['retry-after'] || headers['Retry-After'];
     if (!retryAfter) {
       return null;
     }
@@ -276,13 +285,82 @@ export class HopGPTClient {
     }
   }
 
+  _shouldUseFetchForStreaming() {
+    if (this.streamingTransport === 'tls') {
+      return false;
+    }
+
+    if (typeof fetch !== 'function') {
+      if (process.env.HOPGPT_DEBUG === 'true') {
+        console.warn('[HopGPT] fetch is not available; falling back to TLS client for streaming');
+      }
+      return false;
+    }
+
+    return true;
+  }
+
+  _sanitizeHeadersForFetch(headers) {
+    const forbidden = new Set([
+      'connection',
+      'content-length',
+      'accept-encoding',
+      'transfer-encoding',
+      'upgrade',
+      'host',
+      'keep-alive',
+      'proxy-connection',
+      'te',
+      'trailer'
+    ]);
+
+    const sanitized = {};
+    for (const [key, value] of Object.entries(headers)) {
+      if (!forbidden.has(key.toLowerCase())) {
+        sanitized[key] = value;
+      }
+    }
+    return sanitized;
+  }
+
+  async _fetchStream(url, headers, body) {
+    const sanitizedHeaders = this._sanitizeHeadersForFetch(headers);
+
+    return fetch(url, {
+      method: 'POST',
+      headers: sanitizedHeaders,
+      body: JSON.stringify(body)
+    });
+  }
+
+  async _readResponseText(response) {
+    if (!response) {
+      return '';
+    }
+
+    if (typeof response.text === 'function') {
+      try {
+        return await response.text();
+      } catch (error) {
+        return '';
+      }
+    }
+
+    return response.body || '';
+  }
+
   /**
    * Send a message to HopGPT
    * @param {object} hopGPTRequest - Request body in HopGPT format
+   * @param {object} requestOptions - Request options
    * @param {object} retryState - Internal retry state
    * @returns {Response} Fetch-like response object with body as string (SSE data)
    */
-  async sendMessage(hopGPTRequest, retryState = { isAuthRetry: false, rateLimitAttempt: 0 }) {
+  async sendMessage(
+    hopGPTRequest,
+    requestOptions = {},
+    retryState = { isAuthRetry: false, rateLimitAttempt: 0 }
+  ) {
     const url = `${this.baseURL}${this.endpoint}`;
 
     // Detect browser type from User-Agent
@@ -298,6 +376,13 @@ export class HopGPTClient {
       'Referer': `${this.baseURL}/c/new`
     };
 
+    const isStreaming = requestOptions.stream === true;
+    if (isStreaming) {
+      headers['Accept'] = 'text/event-stream';
+      headers['Cache-Control'] = 'no-cache';
+      headers['Pragma'] = 'no-cache';
+    }
+
     // Add Bearer token if configured
     if (this.bearerToken) {
       headers['Authorization'] = `Bearer ${this.bearerToken}`;
@@ -309,16 +394,33 @@ export class HopGPTClient {
       headers['Cookie'] = cookieHeader;
     }
 
-    // Use TLS client with browser fingerprint to bypass Cloudflare
-    const response = await tlsFetch({
-      url,
-      method: 'POST',
-      headers,
-      body: hopGPTRequest,
-      browserType
-    });
+    let useFetchForStreaming = isStreaming && this._shouldUseFetchForStreaming();
+    let response;
+
+    if (useFetchForStreaming) {
+      try {
+        response = await this._fetchStream(url, headers, hopGPTRequest);
+      } catch (error) {
+        useFetchForStreaming = false;
+        if (process.env.HOPGPT_DEBUG === 'true') {
+          console.warn(`[HopGPT] Streaming fetch failed (${error.message}), falling back to TLS client`);
+        }
+      }
+    }
+
+    if (!useFetchForStreaming) {
+      response = await tlsFetch({
+        url,
+        method: 'POST',
+        headers,
+        body: hopGPTRequest,
+        browserType
+      });
+    }
 
     if (!response.ok) {
+      const errorText = await this._readResponseText(response);
+
       // Handle rate limiting (429)
       if (response.status === 429) {
         const retryAfterMs = this._extractRetryAfter(response.headers);
@@ -338,7 +440,7 @@ export class HopGPTClient {
           throw new HopGPTError(
             response.status,
             `Rate limited. Retry after ${Math.ceil(retryAfterMs / 1000)} seconds.`,
-            response.body,
+            errorText,
             retryAfterMs
           );
         }
@@ -347,7 +449,7 @@ export class HopGPTClient {
           console.log(`[HopGPT] Waiting ${waitTime}ms before retry...`);
           await this._sleep(waitTime);
 
-          return this.sendMessage(hopGPTRequest, {
+          return this.sendMessage(hopGPTRequest, requestOptions, {
             ...retryState,
             rateLimitAttempt: rateLimitAttempt + 1
           });
@@ -358,7 +460,7 @@ export class HopGPTClient {
         throw new HopGPTError(
           response.status,
           'Rate limit retries exhausted. Please try again later.',
-          response.body,
+          errorText,
           retryAfterMs
         );
       }
@@ -370,16 +472,19 @@ export class HopGPTClient {
         const refreshed = await this.refreshTokens();
         if (refreshed) {
           console.log('[HopGPT] Retrying request with new token...');
-          return this.sendMessage(hopGPTRequest, { ...retryState, isAuthRetry: true });
+          return this.sendMessage(hopGPTRequest, requestOptions, { ...retryState, isAuthRetry: true });
         }
       }
 
-      const errorText = response.body;
       throw new HopGPTError(
         response.status,
         `HopGPT request failed: ${response.status} ${response.statusText}`,
         errorText
       );
+    }
+
+    if (useFetchForStreaming) {
+      return response;
     }
 
     // Return a response-like object that the SSE parser can work with
