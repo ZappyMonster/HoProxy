@@ -334,6 +334,7 @@ curl -X POST http://localhost:3001/refresh-token
 | `HOPGPT_COOKIE_REFRESH_TOKEN` | Refresh token cookie (required for auto-refresh) |
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
 | `CONVERSATION_TTL_MS` | In-memory conversation state TTL in ms (default: 21600000) |
+| `HOPGPT_DEBUG` | Enable debug logging for troubleshooting (default: unset) |
 
 Extraction-only:
 - `HOPGPT_PUPPETEER_CHANNEL`
@@ -347,6 +348,7 @@ Extraction-only:
 | `/v1/models` | GET | List available models |
 | `/v1/models/:model_id` | GET | Fetch a specific model |
 | `/refresh-token` | POST | Refresh HopGPT bearer token using refresh cookie |
+| `/token-status` | GET | Check token expiry status and time remaining |
 | `/health` | GET | Health check |
 
 ## Conversation State
@@ -413,7 +415,8 @@ src/
 ## Testing
 
 ```bash
-npm test
+npm test           # Run tests once
+npm run test:watch # Run tests in watch mode
 ```
 
 ## License
