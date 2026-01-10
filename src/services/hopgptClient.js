@@ -25,6 +25,7 @@ export class HopGPTClient {
       process.env.HOPGPT_STREAMING_TRANSPORT ||
       'fetch').toLowerCase();
     this.isRefreshing = false;
+    this.refreshPromise = null;  // Promise-based mutex for concurrent refresh
     // Proactive refresh buffer: refresh this many seconds before expiration
     this.proactiveRefreshBufferSec = config.proactiveRefreshBufferSec ?? 60;
     
@@ -347,8 +348,9 @@ export class HopGPTClient {
 
     const expiryInfo = this._getTokenExpiryInfo(this.bearerToken);
     if (!expiryInfo) {
-      // If we have no bearer token or can't decode it, try to refresh
-      return !this.bearerToken;
+      // If we have no bearer token or can't decode it as JWT, refresh proactively
+      // This fixes the case where bearerToken exists but is invalid/malformed
+      return true;
     }
 
     // Refresh if token expires within the buffer period
@@ -362,11 +364,16 @@ export class HopGPTClient {
   async ensureValidToken() {
     if (this._shouldProactivelyRefresh()) {
       const expiryInfo = this._getTokenExpiryInfo(this.bearerToken);
-      const reason = !this.bearerToken
-        ? 'no bearer token'
-        : expiryInfo?.isExpired
-          ? 'bearer token expired'
-          : `bearer token expires in ${expiryInfo?.expiresInSeconds}s (buffer: ${this.proactiveRefreshBufferSec}s)`;
+      let reason;
+      if (!this.bearerToken) {
+        reason = 'no bearer token';
+      } else if (!expiryInfo) {
+        reason = 'bearer token is not a valid JWT';
+      } else if (expiryInfo.isExpired) {
+        reason = 'bearer token expired';
+      } else {
+        reason = `bearer token expires in ${expiryInfo.expiresInSeconds}s (buffer: ${this.proactiveRefreshBufferSec}s)`;
+      }
       console.log(`[HopGPT] Proactive token refresh triggered: ${reason}`);
       return await this.refreshTokens();
     }
@@ -378,10 +385,11 @@ export class HopGPTClient {
    * @returns {Promise<boolean>} True if refresh succeeded
    */
   async refreshTokens() {
-    if (this.isRefreshing) {
-      // Wait for ongoing refresh to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
-      return !!this.bearerToken;
+    // Use promise-based mutex to handle concurrent refresh requests
+    // All concurrent callers will await the same refresh operation
+    if (this.refreshPromise) {
+      console.log('[HopGPT] Waiting for ongoing token refresh...');
+      return this.refreshPromise;
     }
 
     if (!this.cookies.refreshToken) {
@@ -389,6 +397,22 @@ export class HopGPTClient {
       return false;
     }
 
+    // Create and store the refresh promise so concurrent requests can await it
+    this.refreshPromise = this._doRefreshTokens();
+    
+    try {
+      return await this.refreshPromise;
+    } finally {
+      this.refreshPromise = null;
+    }
+  }
+
+  /**
+   * Internal method that performs the actual token refresh
+   * @returns {Promise<boolean>} True if refresh succeeded
+   * @private
+   */
+  async _doRefreshTokens() {
     this.isRefreshing = true;
     console.log('[HopGPT] Attempting to refresh tokens...');
 
