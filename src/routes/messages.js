@@ -15,6 +15,20 @@ import { resolveModelMapping } from '../utils/modelMapping.js';
 const router = Router();
 
 /**
+ * POST /v1/messages/count_tokens
+ * Anthropic Messages API token count endpoint (not implemented)
+ */
+router.post('/messages/count_tokens', (req, res) => {
+  res.status(501).json({
+    type: 'error',
+    error: {
+      type: 'not_implemented',
+      message: 'Token counting is not implemented. Use /v1/messages and configure your client to skip token counting.'
+    }
+  });
+});
+
+/**
  * POST /v1/messages
  * Anthropic Messages API compatible endpoint
  */
@@ -273,17 +287,172 @@ function handleError(error, res) {
 
   if (error instanceof HopGPTError) {
     const statusCode = error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 502;
-    return res.status(statusCode).json(error.toAnthropicError());
+    const responseBody = typeof error.responseBody === 'string' ? error.responseBody : '';
+    const resolved = mapErrorResponse({
+      statusCode,
+      message: error.message,
+      responseBody,
+      fallbackType: error.toAnthropicError().error?.type || 'api_error',
+      retryAfterMs: error.retryAfterMs
+    });
+
+    if (resolved.retryAfterSeconds) {
+      res.setHeader('Retry-After', resolved.retryAfterSeconds);
+    }
+    return res.status(resolved.statusCode).json(resolved.payload);
   }
 
-  // Generic error
-  res.status(500).json({
-    type: 'error',
-    error: {
-      type: 'api_error',
-      message: error.message || 'Internal server error'
-    }
+  const fallback = mapErrorResponse({
+    statusCode: 500,
+    message: error?.message,
+    responseBody: '',
+    fallbackType: 'api_error',
+    retryAfterMs: null
   });
+  if (fallback.retryAfterSeconds) {
+    res.setHeader('Retry-After', fallback.retryAfterSeconds);
+  }
+  res.status(fallback.statusCode).json(fallback.payload);
 }
 
 export default router;
+
+function mapErrorResponse({ statusCode, message, responseBody, fallbackType, retryAfterMs }) {
+  const errorText = extractErrorText(message, responseBody);
+  const errorTextLower = errorText.toLowerCase();
+  const retryAfterSeconds = retryAfterMs
+    ? Math.ceil(retryAfterMs / 1000)
+    : parseRetryAfterSeconds(errorText);
+
+  if (statusCode === 401 || errorTextLower.includes('unauthorized') || errorTextLower.includes('unauthenticated')) {
+    return buildErrorResponse(401, 'authentication_error', errorText, retryAfterSeconds);
+  }
+
+  if (statusCode === 403 || errorTextLower.includes('forbidden') || errorTextLower.includes('permission')) {
+    return buildErrorResponse(403, 'permission_error', errorText, retryAfterSeconds);
+  }
+
+  if (statusCode === 429 || isRateLimitMessage(errorTextLower)) {
+    return buildErrorResponse(429, 'rate_limit_error', errorText, retryAfterSeconds);
+  }
+
+  if (statusCode === 400 || isInvalidRequestMessage(errorTextLower)) {
+    return buildErrorResponse(400, 'invalid_request_error', errorText, retryAfterSeconds);
+  }
+
+  const resolvedStatus = statusCode >= 400 && statusCode < 600 ? statusCode : 502;
+  const resolvedType = fallbackType || (resolvedStatus >= 500 ? 'api_error' : 'invalid_request_error');
+  return buildErrorResponse(resolvedStatus, resolvedType, errorText, retryAfterSeconds);
+}
+
+function buildErrorResponse(statusCode, errorType, message, retryAfterSeconds) {
+  const payload = {
+    type: 'error',
+    error: {
+      type: errorType,
+      message: message || 'Internal server error'
+    }
+  };
+
+  if (retryAfterSeconds) {
+    payload.error.retry_after_seconds = retryAfterSeconds;
+  }
+
+  return {
+    statusCode,
+    payload,
+    retryAfterSeconds
+  };
+}
+
+function extractErrorText(message, responseBody) {
+  if (typeof responseBody === 'string' && responseBody.trim()) {
+    const parsed = parseErrorMessageFromBody(responseBody);
+    if (parsed) {
+      return parsed;
+    }
+  }
+
+  if (typeof message === 'string' && message.trim()) {
+    return message;
+  }
+
+  return 'Internal server error';
+}
+
+function parseErrorMessageFromBody(body) {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (typeof parsed?.error?.message === 'string') {
+      return parsed.error.message;
+    }
+    if (typeof parsed?.message === 'string') {
+      return parsed.message;
+    }
+    if (typeof parsed === 'string') {
+      return parsed;
+    }
+  } catch (error) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+function isRateLimitMessage(text) {
+  return text.includes('rate limit') ||
+    text.includes('too many requests') ||
+    text.includes('resource_exhausted') ||
+    text.includes('quota') ||
+    text.includes('retry after');
+}
+
+function isInvalidRequestMessage(text) {
+  return text.includes('invalid request') ||
+    text.includes('invalid_argument') ||
+    text.includes('invalid input') ||
+    text.includes('bad request');
+}
+
+function parseRetryAfterSeconds(text) {
+  if (!text) {
+    return null;
+  }
+
+  const retryMatch = text.match(/retry\s*after\s*([\d.]+)\s*(ms|s|sec|secs|seconds|m|minutes|h|hours)?/i);
+  if (retryMatch) {
+    const value = Number.parseFloat(retryMatch[1]);
+    const unit = (retryMatch[2] || 's').toLowerCase();
+    if (Number.isFinite(value)) {
+      if (unit.startsWith('ms')) return Math.ceil(value / 1000);
+      if (unit.startsWith('m')) return Math.ceil(value * 60);
+      if (unit.startsWith('h')) return Math.ceil(value * 3600);
+      return Math.ceil(value);
+    }
+  }
+
+  const durationMatch = text.match(/(\d+)h(\d+)m(\d+)s|(\d+)m(\d+)s|(\d+)s/i);
+  if (durationMatch) {
+    if (durationMatch[1]) {
+      const hours = Number.parseInt(durationMatch[1], 10);
+      const minutes = Number.parseInt(durationMatch[2], 10);
+      const seconds = Number.parseInt(durationMatch[3], 10);
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+    if (durationMatch[4]) {
+      const minutes = Number.parseInt(durationMatch[4], 10);
+      const seconds = Number.parseInt(durationMatch[5], 10);
+      return minutes * 60 + seconds;
+    }
+    if (durationMatch[6]) {
+      return Number.parseInt(durationMatch[6], 10);
+    }
+  }
+
+  return null;
+}
