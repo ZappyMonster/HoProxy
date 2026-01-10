@@ -135,18 +135,20 @@ describe('HopGPTClient', () => {
         return successResponse;
       });
 
-      const client = new HopGPTClient({
-        baseURL: 'https://example.com',
-        bearerToken: 'token',
-        refreshToken: 'refresh-token',
-        rateLimitMaxRetries: 3,
-        rateLimitBaseDelayMs: 10  // Use short delay for tests
-      });
-
-      const response = await client.sendMessage({ text: 'hello' });
-      expect(response.ok).toBe(true);
-      expect(tlsFetchSpy).toHaveBeenCalledTimes(2);
+    const client = new HopGPTClient({
+      baseURL: 'https://example.com',
+      bearerToken: 'token',
+      refreshToken: 'refresh-token',
+      rateLimitMaxRetries: 3,
+      rateLimitBaseDelayMs: 10  // Use short delay for tests
     });
+    const sleepSpy = vi.spyOn(client, '_sleep').mockResolvedValue();
+
+    const response = await client.sendMessage({ text: 'hello' });
+    expect(response.ok).toBe(true);
+    expect(tlsFetchSpy).toHaveBeenCalledTimes(2);
+    expect(sleepSpy).toHaveBeenCalledTimes(1);
+  });
 
     it('throws error when rate limit retries are exhausted', async () => {
       const rateLimitResponse = createMockTLSResponse({
@@ -159,20 +161,22 @@ describe('HopGPTClient', () => {
 
       tlsFetchSpy.mockResolvedValue(rateLimitResponse);
 
-      const client = new HopGPTClient({
-        baseURL: 'https://example.com',
-        bearerToken: 'token',
-        refreshToken: 'refresh-token',
-        rateLimitMaxRetries: 2,
-        rateLimitBaseDelayMs: 10
-      });
-
-      await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
-        'Rate limit retries exhausted. Please try again later.'
-      );
-      // Initial attempt + 2 retries = 3 calls
-      expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
+    const client = new HopGPTClient({
+      baseURL: 'https://example.com',
+      bearerToken: 'token',
+      refreshToken: 'refresh-token',
+      rateLimitMaxRetries: 2,
+      rateLimitBaseDelayMs: 10
     });
+    const sleepSpy = vi.spyOn(client, '_sleep').mockResolvedValue();
+
+    await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(
+      'Rate limit retries exhausted. Please try again later.'
+    );
+    // Initial attempt + 2 retries = 3 calls
+    expect(tlsFetchSpy).toHaveBeenCalledTimes(3);
+    expect(sleepSpy).toHaveBeenCalledTimes(2);
+  });
 
     it('does not retry when Retry-After exceeds maxWaitTimeMs', async () => {
       const rateLimitResponse = createMockTLSResponse({
