@@ -4,6 +4,9 @@ import express from 'express';
 import messagesRouter from './routes/messages.js';
 import modelsRouter from './routes/models.js';
 import refreshTokenRouter from './routes/refreshToken.js';
+import { requestLoggerMiddleware, createLogger } from './utils/logger.js';
+
+const log = createLogger('Server');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -24,15 +27,8 @@ app.use((req, res, next) => {
   next();
 });
 
-// Request logging
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
-  });
-  next();
-});
+// Request logging with tracing
+app.use(requestLoggerMiddleware());
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -57,7 +53,11 @@ app.use((req, res) => {
 
 // Error handler
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
+  log.error('Unhandled error', {
+    requestId: req.id,
+    error: err.message,
+    stack: process.env.HOPGPT_DEBUG === 'true' ? err.stack : undefined
+  });
   res.status(500).json({
     type: 'error',
     error: {
@@ -69,6 +69,7 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => {
+  log.info(`Server started on port ${PORT}`);
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║          HopGPT Anthropic API Proxy                        ║

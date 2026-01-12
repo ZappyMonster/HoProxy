@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { getDefaultClient } from '../services/hopgptClient.js';
+import { loggers } from '../utils/logger.js';
 
+const log = loggers.auth;
 const router = Router();
 
 function getTokenExpiryInfo(token) {
@@ -52,6 +54,7 @@ function getTokenExpiryInfo(token) {
  */
 router.get('/token-status', (req, res) => {
   const client = getDefaultClient();
+  log.debug('Checking token status');
 
   const bearerTokenInfo = getTokenExpiryInfo(client.bearerToken);
   const refreshTokenInfo = getTokenExpiryInfo(client.cookies?.refreshToken);
@@ -86,8 +89,10 @@ router.get('/token-status', (req, res) => {
  */
 router.post('/refresh-token', async (req, res) => {
   const client = getDefaultClient();
+  log.info('Manual token refresh requested');
 
   if (!client.cookies?.refreshToken) {
+    log.warn('Token refresh failed: no refresh token configured');
     return res.status(400).json({
       success: false,
       error: {
@@ -98,6 +103,14 @@ router.post('/refresh-token', async (req, res) => {
 
   const refreshed = await client.refreshTokens();
   const tokenExpiry = refreshed ? getTokenExpiryInfo(client.bearerToken) : null;
+
+  if (refreshed) {
+    log.info('Token refresh successful', {
+      expiresIn: tokenExpiry?.expiresInSeconds ? `${Math.floor(tokenExpiry.expiresInSeconds / 60)}m` : 'unknown'
+    });
+  } else {
+    log.error('Token refresh failed');
+  }
 
   return res.status(refreshed ? 200 : 502).json({
     success: refreshed,

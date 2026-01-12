@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from "uuid";
 import { isThinkingModel } from "./hopGPTToAnthropic.js";
 import { prepareMessagesForThinking } from "./thinkingUtils.js";
+import { loggers } from '../utils/logger.js';
+
+const log = loggers.transform;
 
 /**
  * Build a tool injection prompt that tells the model about available tools
@@ -609,6 +612,16 @@ export function transformAnthropicToHopGPT(
     stop_sequences,
     stop,
   } = anthropicRequest;
+  
+  log.debug('Transforming Anthropic request to HopGPT', {
+    model,
+    messageCount: messages?.length || 0,
+    hasSystem: !!system,
+    toolCount: tools?.length || 0,
+    hasToolChoice: !!tool_choice,
+    maxTokens: max_tokens
+  });
+  
   const imageDetail = "high";
   const toolCallStopSequence = "</mcp_tool_call>";
   const normalizedTools = normalizeToolDefinitions(tools);
@@ -726,7 +739,15 @@ export function transformAnthropicToHopGPT(
   if (thinkingConfig.enabled) {
     hopGPTRequest.reasoning_effort = "high";
     hopGPTRequest.reasoning_summary = "detailed";
+    log.debug('Thinking mode enabled', { model });
   }
+
+  log.debug('Request transformation complete', {
+    textLength: text.length,
+    hasImages: images.length > 0,
+    toolsInjected: !!toolInjection,
+    isNewConversation
+  });
 
   return hopGPTRequest;
 }

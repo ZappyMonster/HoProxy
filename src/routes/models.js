@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import { loggers } from '../utils/logger.js';
 
+const log = loggers.model;
 const router = Router();
 
 /**
@@ -38,6 +40,7 @@ const AVAILABLE_MODELS = [
  * Returns list of available models
  */
 router.get('/models', (req, res) => {
+  log.debug('Listing models', { count: AVAILABLE_MODELS.length });
   res.json({
     object: 'list',
     data: AVAILABLE_MODELS,
@@ -52,6 +55,7 @@ router.get('/models/:model_id', (req, res) => {
   const model = AVAILABLE_MODELS.find(m => m.id === req.params.model_id);
 
   if (!model) {
+    log.debug('Model not found', { modelId: req.params.model_id });
     return res.status(404).json({
       type: 'error',
       error: {
@@ -61,6 +65,7 @@ router.get('/models/:model_id', (req, res) => {
     });
   }
 
+  log.debug('Model retrieved', { modelId: model.id });
   res.json(model);
 });
 

@@ -1,6 +1,9 @@
 import { tlsFetch } from './tlsClient.js';
 import fs from 'fs';
 import path from 'path';
+import { loggers } from '../utils/logger.js';
+
+const log = loggers.hopgpt;
 
 /**
  * HopGPT API Client
@@ -214,7 +217,7 @@ export class HopGPTClient {
 
       if (name === 'refreshToken') {
         this.cookies.refreshToken = value;
-        console.log('[HopGPT] Refresh token updated');
+        log.debug('Refresh token updated');
       } else if (name === 'connect.sid') {
         this.cookies.connect_sid = value;
       } else if (name === 'cf_clearance') {
@@ -294,9 +297,9 @@ export class HopGPTClient {
       // Write back to .env
       fs.writeFileSync(this.envPath, finalContent);
 
-      console.log('[HopGPT] Credentials persisted to .env');
+      log.debug('Credentials persisted to .env');
     } catch (error) {
-      console.error('[HopGPT] Failed to persist credentials:', error.message);
+      log.error('Failed to persist credentials', { error: error.message });
     }
   }
 
@@ -375,7 +378,7 @@ export class HopGPTClient {
       } else {
         reason = `bearer token expires in ${expiryInfo.expiresInSeconds}s (buffer: ${this.proactiveRefreshBufferSec}s)`;
       }
-      console.log(`[HopGPT] Proactive token refresh triggered: ${reason}`);
+      log.info(`Proactive token refresh: ${reason}`);
       return await this.refreshTokens();
     }
     return true;
@@ -415,9 +418,11 @@ export class HopGPTClient {
    */
   async _doRefreshTokens() {
     this.isRefreshing = true;
-    const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
-    console.log('[HopGPT] Attempting to refresh tokens...');
-    console.log('[HopGPT] Refresh token info:', refreshTokenInfo ?
+      const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
+      log.info('Attempting token refresh', {
+        refreshTokenExpiry: refreshTokenInfo ? `${refreshTokenInfo.expiresInSeconds}s` : 'invalid'
+      });
+      log.debug('Refresh token info:', refreshTokenInfo ?
       `expires in ${Math.round(refreshTokenInfo.expiresInSeconds / 3600)}h, expired: ${refreshTokenInfo.isExpired}` :
       'no valid refresh token');
 
@@ -499,7 +504,7 @@ export class HopGPTClient {
 
       return true;
     } catch (error) {
-      console.error('[HopGPT] Token refresh error:', error.message);
+      log.error('Token refresh error', { error: error.message });
       return false;
     } finally {
       this.isRefreshing = false;
