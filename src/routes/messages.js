@@ -132,7 +132,8 @@ router.post('/messages', async (req, res) => {
     // Determine if streaming
     const isStreaming = anthropicRequest.stream === true;
 
-    const responseModel = modelMapping.responseModel || anthropicRequest.model;
+    // Echo the requested model in responses to avoid client-side model validation errors.
+    const responseModel = anthropicRequest.model;
 
     const transformer = new HopGPTToAnthropicTransformer(responseModel, transformerOptions);
 

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { loggers } from '../utils/logger.js';
+import { MODEL_MAPPINGS, resolveModelMapping } from '../utils/modelMapping.js';
 
 const log = loggers.model;
 const router = Router();
@@ -8,7 +9,7 @@ const router = Router();
  * Available models in HopGPT
  * Format compatible with Anthropic's model list API
  */
-const AVAILABLE_MODELS = [
+const CANONICAL_MODELS = [
   {
     id: 'claude-opus-4-5-thinking',
     object: 'model',
@@ -35,6 +36,34 @@ const AVAILABLE_MODELS = [
   },
 ];
 
+const MODEL_BY_ID = new Map(CANONICAL_MODELS.map(model => [model.id, model]));
+
+function buildAliasModels() {
+  const aliasModels = [];
+  const seen = new Set(MODEL_BY_ID.keys());
+
+  for (const mapping of MODEL_MAPPINGS) {
+    const canonicalModel = MODEL_BY_ID.get(mapping.canonical);
+    if (!canonicalModel) continue;
+
+    for (const alias of mapping.aliases) {
+      if (seen.has(alias)) continue;
+      aliasModels.push({
+        ...canonicalModel,
+        id: alias
+      });
+      seen.add(alias);
+    }
+  }
+
+  return aliasModels;
+}
+
+const AVAILABLE_MODELS = [
+  ...CANONICAL_MODELS,
+  ...buildAliasModels()
+];
+
 /**
  * GET /v1/models
  * Returns list of available models
@@ -52,7 +81,21 @@ router.get('/models', (req, res) => {
  * Returns a specific model by ID
  */
 router.get('/models/:model_id', (req, res) => {
-  const model = AVAILABLE_MODELS.find(m => m.id === req.params.model_id);
+  const requestedId = req.params.model_id;
+  let model = AVAILABLE_MODELS.find(m => m.id === requestedId);
+
+  if (!model) {
+    const mapping = resolveModelMapping(requestedId);
+    if (mapping.mapped) {
+      const canonicalModel = MODEL_BY_ID.get(mapping.responseModel);
+      if (canonicalModel) {
+        model = {
+          ...canonicalModel,
+          id: requestedId
+        };
+      }
+    }
+  }
 
   if (!model) {
     log.debug('Model not found', { modelId: req.params.model_id });

@@ -35,6 +35,22 @@ describe('models routes', () => {
     expect(response.body.id).toBe('claude-haiku-4-5-thinking');
   });
 
+  it('returns an alias model with the requested id', async () => {
+    const app = createApp();
+    const response = await request(app).get('/v1/models/claude-opus-4-5');
+
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe('claude-opus-4-5');
+  });
+
+  it('returns a version-suffixed model id when mapped', async () => {
+    const app = createApp();
+    const response = await request(app).get('/v1/models/claude-opus-4-5-thinking-2025-01-01');
+
+    expect(response.status).toBe(200);
+    expect(response.body.id).toBe('claude-opus-4-5-thinking-2025-01-01');
+  });
+
   it('returns a not_found_error for unknown models', async () => {
     const app = createApp();
     const response = await request(app).get('/v1/models/unknown-model');
