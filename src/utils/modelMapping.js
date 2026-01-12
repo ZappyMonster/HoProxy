@@ -1,3 +1,7 @@
+import { loggers } from './logger.js';
+
+const log = loggers.model;
+
 const MODEL_MAPPINGS = Object.freeze([
   {
     canonical: 'claude-opus-4-5-thinking',
@@ -89,6 +93,11 @@ export function resolveModelMapping(modelName) {
   for (const candidate of candidates) {
     const mapping = MODEL_ALIAS_MAP.get(candidate);
     if (mapping) {
+      log.debug('Model mapped', {
+        input: modelName,
+        hopgpt: mapping.hopgpt,
+        response: mapping.canonical
+      });
       return {
         hopgptModel: mapping.hopgpt,
         responseModel: mapping.canonical,
@@ -97,6 +106,7 @@ export function resolveModelMapping(modelName) {
     }
   }
 
+  log.debug('Model not mapped, using as-is', { model: modelName });
   return {
     hopgptModel: modelName,
     responseModel: modelName,

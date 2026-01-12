@@ -1,5 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import { loggers } from '../utils/logger.js';
 
+const log = loggers.session;
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
 
 const sessionStore = new Map();
@@ -22,10 +24,15 @@ function getTtlMs() {
 
 function cleanupExpiredSessions(now = Date.now()) {
   const ttlMs = getTtlMs();
+  let expiredCount = 0;
   for (const [sessionId, entry] of sessionStore.entries()) {
     if (now - entry.lastTouchedAt > ttlMs) {
       sessionStore.delete(sessionId);
+      expiredCount++;
     }
+  }
+  if (expiredCount > 0) {
+    log.debug(`Cleaned up ${expiredCount} expired sessions`, { remaining: sessionStore.size });
   }
 }
 
@@ -46,10 +53,13 @@ export function resolveSessionId(req, requestBody) {
   const sessionId = headerSessionId || metadataSessionId;
 
   if (sessionId) {
+    log.debug('Using provided session ID', { sessionId: sessionId.slice(0, 8) + '...' });
     return { sessionId, isGenerated: false };
   }
 
-  return { sessionId: uuidv4(), isGenerated: true };
+  const newSessionId = uuidv4();
+  log.debug('Generated new session ID', { sessionId: newSessionId.slice(0, 8) + '...' });
+  return { sessionId: newSessionId, isGenerated: true };
 }
 
 export function shouldResetConversation(req, requestBody) {
@@ -74,10 +84,16 @@ export function getConversationState(sessionId) {
 
   const entry = sessionStore.get(normalizedSessionId);
   if (!entry) {
+    log.debug('No existing conversation state', { sessionId: normalizedSessionId.slice(0, 8) + '...' });
     return null;
   }
 
   entry.lastTouchedAt = Date.now();
+  log.debug('Retrieved conversation state', {
+    sessionId: normalizedSessionId.slice(0, 8) + '...',
+    hasConversationId: !!entry.conversationId,
+    hasLastMessageId: !!entry.lastAssistantMessageId
+  });
   return {
     conversationId: entry.conversationId || null,
     lastAssistantMessageId: entry.lastAssistantMessageId || null,
@@ -94,6 +110,7 @@ export function updateConversationState(sessionId, state) {
   cleanupExpiredSessions();
 
   const now = Date.now();
+  const isNew = !sessionStore.has(normalizedSessionId);
   const entry = sessionStore.get(normalizedSessionId) || { createdAt: now };
   const conversationId = normalizeId(state.conversationId);
   const lastAssistantMessageId = normalizeId(state.lastAssistantMessageId);
@@ -111,6 +128,13 @@ export function updateConversationState(sessionId, state) {
 
   entry.lastTouchedAt = now;
   sessionStore.set(normalizedSessionId, entry);
+  
+  log.debug(isNew ? 'Created conversation state' : 'Updated conversation state', {
+    sessionId: normalizedSessionId.slice(0, 8) + '...',
+    hasConversationId: !!conversationId,
+    hasLastMessageId: !!lastAssistantMessageId,
+    totalSessions: sessionStore.size
+  });
 }
 
 export function resetConversationState(sessionId) {
@@ -118,5 +142,9 @@ export function resetConversationState(sessionId) {
   if (!normalizedSessionId) {
     return;
   }
+  const existed = sessionStore.has(normalizedSessionId);
   sessionStore.delete(normalizedSessionId);
+  if (existed) {
+    log.info('Reset conversation state', { sessionId: normalizedSessionId.slice(0, 8) + '...' });
+  }
 }

@@ -1,5 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { cacheThinkingSignature, cacheToolSignature } from './signatureCache.js';
+import { loggers } from '../utils/logger.js';
+
+const log = loggers.transform;
 
 // Pattern for <mcp_tool_call> blocks
 const MCP_TOOL_CALL_BLOCK_RE = /<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>/gi;
@@ -98,8 +101,8 @@ function parseMcpToolCallBlock(block) {
     try {
       parsedArgs = JSON.parse(argsText.trim());
     } catch (error) {
-      console.warn('Failed to parse MCP tool call arguments:', error);
-      return null;
+      log.warn('Failed to parse MCP tool call arguments', { error: error.message });
+      parsedArgs = { _raw: argsText.trim() };
     }
   }
 
@@ -187,8 +190,7 @@ function parseToolCallJsonBlock(block) {
       arguments: normalizedArgs
     };
   } catch (error) {
-    console.warn('Failed to parse tool_call JSON:', error);
-    return null;
+    log.warn('Failed to parse tool_call JSON', { error: error.message });
   }
 }
 
@@ -480,16 +482,14 @@ export class HopGPTToAnthropicTransformer {
       const data = JSON.parse(event.data);
       return this._transformData(data);
     } catch (error) {
-      console.error('Failed to parse SSE event:', error);
+      log.error('Failed to parse SSE event', { error: error.message });
       return null;
     }
   }
 
   _transformData(data) {
     // Debug logging to trace what HopGPT sends
-    if (process.env.HOPGPT_DEBUG === 'true') {
-      console.log('[Transform] Event:', JSON.stringify(data).slice(0, 500));
-    }
+    log.debug('Processing HopGPT event', { eventType: data.event || (data.created ? 'created' : data.final ? 'final' : 'unknown') });
 
     // Event type 1: Initial message created
     if (data.created && data.message) {

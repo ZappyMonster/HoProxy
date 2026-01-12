@@ -11,7 +11,9 @@ import {
 } from '../services/conversationStore.js';
 import { pipeSSEStream, parseSSEStream } from '../utils/sseParser.js';
 import { resolveModelMapping } from '../utils/modelMapping.js';
+import { loggers } from '../utils/logger.js';
 
+const log = loggers.messages;
 const router = Router();
 
 /**
@@ -65,13 +67,13 @@ router.post('/messages', async (req, res) => {
 
     // Log any warnings
     if (authValidation.warnings?.length > 0) {
-      authValidation.warnings.forEach(warning => console.log(`[Auth Warning] ${warning}`));
+      authValidation.warnings.forEach(warning => log.warn(warning));
     }
 
     // Resolve model mapping for HopGPT and response model names
     const modelMapping = resolveModelMapping(anthropicRequest.model);
     if (!modelMapping.mapped && anthropicRequest.model) {
-      console.warn(`[Model Warning] Unmapped model "${anthropicRequest.model}", using as-is`);
+      log.warn(`Unmapped model "${anthropicRequest.model}", using as-is`);
     }
 
     const { sessionId } = resolveSessionId(req, anthropicRequest);
@@ -93,13 +95,11 @@ router.post('/messages', async (req, res) => {
     hopGPTRequest.model = modelMapping.hopgptModel || hopGPTRequest.model;
 
     // Debug logging for transformed request
-    if (process.env.HOPGPT_DEBUG === 'true') {
-      console.log('[Messages] Transformed model:', hopGPTRequest.model);
-      if (hopGPTRequest.tools) {
-        console.log('[Messages] Transformed tools count:', hopGPTRequest.tools.length);
-        console.log('[Messages] First tool sample:', JSON.stringify(hopGPTRequest.tools[0], null, 2));
-      }
-    }
+    log.debug('Request transformed', {
+      model: hopGPTRequest.model,
+      toolCount: hopGPTRequest.tools?.length || 0,
+      streaming: anthropicRequest.stream === true
+    });
 
     // Extract thinking configuration for response transformer
     const thinkingConfig = extractThinkingConfig(anthropicRequest);
@@ -114,15 +114,12 @@ router.post('/messages', async (req, res) => {
       anthropicRequest.metadata?.mcp_passthrough === true ||
       anthropicRequest.metadata?.mcpPassthrough === true;
 
-    // Debug logging
-    if (process.env.HOPGPT_DEBUG === 'true') {
-      console.log('[Messages] mcpPassthrough:', mcpPassthrough);
-      console.log('[Messages] streaming:', anthropicRequest.stream === true);
-      console.log('[Messages] tools count:', anthropicRequest.tools?.length || 0);
-      if (anthropicRequest.tools?.length > 0) {
-        console.log('[Messages] Tools injected into prompt for model to use');
-      }
-    }
+    log.debug('Processing request', {
+      sessionId: sessionId.slice(0, 8) + '...',
+      mcpPassthrough,
+      thinkingEnabled: thinkingConfig.enabled,
+      hasTools: (anthropicRequest.tools?.length || 0) > 0
+    });
 
     const transformerOptions = {
       thinkingEnabled: thinkingConfig.enabled,
@@ -161,6 +158,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, s
 
   // Prevent request timeout
   res.flushHeaders();
+  log.debug('Starting streaming response', { sessionId: sessionId.slice(0, 8) + '...' });
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
@@ -198,6 +196,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, s
  * Handle non-streaming response
  */
 async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res, sessionId) {
+  log.debug('Starting non-streaming response', { sessionId: sessionId.slice(0, 8) + '...' });
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: false });
 
@@ -292,7 +291,7 @@ function mergeConversationStates(storedState, requestState) {
  * Handle errors and send appropriate response
  */
 function handleError(error, res) {
-  console.error('Request error:', error);
+  log.error('Request failed', { error: error.message, type: error.constructor.name });
 
   if (error instanceof HopGPTError) {
     const statusCode = error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 502;
