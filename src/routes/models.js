@@ -12,27 +12,21 @@ const router = Router();
 const CANONICAL_MODELS = [
   {
     id: 'claude-opus-4-5-thinking',
-    object: 'model',
-    created: 1735689600, // 2025-01-01
-    owned_by: 'anthropic',
+    type: 'model',
+    created_at: '2025-01-01T00:00:00Z',
     display_name: 'Claude Opus 4.5 (Thinking)',
-    max_tokens: 32768,
   },
   {
     id: 'claude-sonnet-4-5-thinking',
-    object: 'model',
-    created: 1735689600, // 2025-01-01
-    owned_by: 'anthropic',
+    type: 'model',
+    created_at: '2025-01-01T00:00:00Z',
     display_name: 'Claude Sonnet 4.5 (Thinking)',
-    max_tokens: 16384,
   },
   {
     id: 'claude-haiku-4-5-thinking',
-    object: 'model',
-    created: 1735689600, // 2025-01-01
-    owned_by: 'anthropic',
+    type: 'model',
+    created_at: '2025-01-01T00:00:00Z',
     display_name: 'Claude Haiku 4.5 (Thinking)',
-    max_tokens: 8192,
   },
 ];
 
