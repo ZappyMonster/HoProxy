@@ -35,7 +35,12 @@ const MODEL_MAPPINGS = Object.freeze([
 const VERSION_SUFFIX_REGEX = /-(\d{8}|\d{4}-\d{2}-\d{2}|latest|stable)$/;
 
 function normalizeModelName(value) {
-  return value.trim().toLowerCase().replace(/_/g, '-');
+  let normalized = value.trim().toLowerCase().replace(/_/g, '-');
+  // Strip provider prefix if present (e.g., "anthropic/claude-opus-4-5-thinking" -> "claude-opus-4-5-thinking")
+  if (normalized.includes('/')) {
+    normalized = normalized.split('/').pop();
+  }
+  return normalized;
 }
 
 function addModelVariants(variants, name) {
