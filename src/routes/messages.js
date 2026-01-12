@@ -140,14 +140,9 @@ router.post('/messages', async (req, res) => {
     const transformer = new HopGPTToAnthropicTransformer(responseModel, transformerOptions);
 
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, transformer, res);
+      await handleStreamingRequest(client, hopGPTRequest, transformer, res, sessionId);
     } else {
-      await handleNonStreamingRequest(client, hopGPTRequest, transformer, res);
-    }
-
-    const nextState = transformer.getConversationState();
-    if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
-      updateConversationState(sessionId, nextState);
+      await handleNonStreamingRequest(client, hopGPTRequest, transformer, res, sessionId);
     }
   } catch (error) {
     handleError(error, res);
@@ -157,7 +152,7 @@ router.post('/messages', async (req, res) => {
 /**
  * Handle streaming response
  */
-async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
+async function handleStreamingRequest(client, hopGPTRequest, transformer, res, sessionId) {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -173,6 +168,13 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
     });
+
+    // Update conversation state BEFORE ending response to prevent race condition
+    // where Claude Code makes another request before state is updated
+    const nextState = transformer.getConversationState();
+    if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
+      updateConversationState(sessionId, nextState);
+    }
 
     res.end();
   } catch (error) {
@@ -195,7 +197,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res) {
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res) {
+async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res, sessionId) {
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: false });
 
@@ -203,6 +205,13 @@ async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res
     await parseSSEStream(hopGPTResponse, (event) => {
       transformer.transformEvent(event);
     });
+
+    // Update conversation state BEFORE sending response to prevent race condition
+    // where Claude Code makes another request before state is updated
+    const nextState = transformer.getConversationState();
+    if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
+      updateConversationState(sessionId, nextState);
+    }
 
     // Build and send the complete response
     const response = transformer.buildNonStreamingResponse();
