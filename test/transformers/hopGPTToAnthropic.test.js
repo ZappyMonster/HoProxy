@@ -649,4 +649,141 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(toolUseBlocks[0].input).toEqual({ file_path: 'README.md' });
     expect(response.stop_reason).toBe('tool_use');
   });
+
+  it('extracts antml:function_calls/antml:invoke blocks from text (Claude Code format)', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Claude Code format with antml: namespace
+    const functionCalls = `<function_calls>
+<invoke name="Bash">
+<parameter name="command">git status</parameter>
+<parameter name="description">Show git status</parameter>
+</invoke>
+<invoke name="Read">
+<parameter name="file_path">/path/to/file.js</parameter>
+</invoke>
+</function_calls>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Let me check the status: ${functionCalls} Done.` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // Text should not contain the XML blocks
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Let me check the status:');
+    expect(textDeltas).toContain('Done.');
+    expect(textDeltas).not.toContain('<function_calls>');
+    expect(textDeltas).not.toContain('<invoke');
+
+    // Both tool_use blocks should be created
+    const toolStarts = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStarts.length).toBe(2);
+    expect(toolStarts[0].data.content_block.name).toBe('Bash');
+    expect(toolStarts[1].data.content_block.name).toBe('Read');
+
+    // Non-streaming response should have both tool_use blocks
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(2);
+    expect(toolUseBlocks[0].name).toBe('Bash');
+    expect(toolUseBlocks[0].input).toEqual({ command: 'git status', description: 'Show git status' });
+    expect(toolUseBlocks[1].name).toBe('Read');
+    expect(toolUseBlocks[1].input).toEqual({ file_path: '/path/to/file.js' });
+    expect(response.stop_reason).toBe('tool_use');
+  });
+
+  it('extracts standalone antml:invoke blocks from text (Claude Code format)', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const invokeCall = `<invoke name="Bash">
+<parameter name="command">npm test</parameter>
+</invoke>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${invokeCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).toContain('Before');
+    expect(textDeltas).toContain('After');
+    expect(textDeltas).not.toContain('<invoke');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Bash');
+    expect(toolUseBlocks[0].input).toEqual({ command: 'npm test' });
+    expect(response.stop_reason).toBe('tool_use');
+  });
 });

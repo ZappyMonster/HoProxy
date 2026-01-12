@@ -6,8 +6,10 @@ const MCP_TOOL_CALL_BLOCK_RE = /<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>/gi;
 const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call';
 
 // Pattern for <function_calls> blocks (used by OpenCode)
-const FUNCTION_CALLS_BLOCK_RE = /<function_calls\b[\s\S]*?<\/function_calls>/gi;
+// Also matches <function_calls> used by Claude Code
+const FUNCTION_CALLS_BLOCK_RE = /<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>/gi;
 const FUNCTION_CALLS_START_TAG = '<function_calls';
+const ANTML_FUNCTION_CALLS_START_TAG = '<function_calls';
 
 // Pattern for <tool_call> blocks with JSON (another OpenCode format)
 const TOOL_CALL_JSON_BLOCK_RE = /<tool_call\b[\s\S]*?<\/tool_call>/gi;
@@ -17,11 +19,14 @@ const TOOL_CALL_JSON_START_TAG = '<tool_call';
 const TOOL_USE_START_TAG = '<tool_use';
 
 // Pattern for standalone <invoke> blocks
-const INVOKE_BLOCK_RE = /<invoke\b[\s\S]*?<\/invoke>/gi;
+// Also matches <invoke> used by Claude Code
+const INVOKE_BLOCK_RE = /<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>/gi;
 const INVOKE_START_TAG = '<invoke';
+const ANTML_INVOKE_START_TAG = '<invoke';
 
 // Combined pattern for any tool call format
-const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<function_calls\b[\s\S]*?<\/function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_use\b[\s\S]*?<\/tool_use>|<invoke\b[\s\S]*?<\/invoke>)/gi;
+// Includes antml: namespace variants used by Claude Code
+const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_use\b[\s\S]*?<\/tool_use>|<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>)/gi;
 
 function extractXmlTagValue(source, tagName) {
   if (!source) {
@@ -107,16 +112,22 @@ function parseMcpToolCallBlock(block) {
 
 /**
  * Parse a single <invoke> block from <function_calls> format
+ * Also handles antml: namespace variants used by Claude Code
  * Format: <invoke name="ToolName"><parameter name="paramName">value</parameter>...</invoke>
+ * Or: <invoke name="ToolName"><parameter name="paramName">value</parameter>...</invoke>
  */
 function parseInvokeBlock(invokeBlock) {
-  const toolName = extractXmlAttribute(invokeBlock, 'invoke', 'name');
+  // Try both antml:invoke and invoke tag names
+  let toolName = extractXmlAttribute(invokeBlock, 'antml:invoke', 'name');
+  if (!toolName) {
+    toolName = extractXmlAttribute(invokeBlock, 'invoke', 'name');
+  }
   if (!toolName) {
     return null;
   }
 
-  // Extract all parameters
-  const parameterRe = /<parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/parameter>/gi;
+  // Extract all parameters - handle both antml:parameter and parameter tags
+  const parameterRe = /<(?:antml:)?parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/(?:antml:)?parameter>/gi;
   const args = {};
   let paramMatch;
   while ((paramMatch = parameterRe.exec(invokeBlock)) !== null) {
@@ -134,9 +145,10 @@ function parseInvokeBlock(invokeBlock) {
 
 /**
  * Parse <function_calls> block containing one or more <invoke> blocks
+ * Also handles antml: namespace variants used by Claude Code
  */
 function parseFunctionCallsBlock(block) {
-  const invokeRe = /<invoke[^>]*>[\s\S]*?<\/invoke>/gi;
+  const invokeRe = /<(?:antml:)?invoke[^>]*>[\s\S]*?<\/(?:antml:)?invoke>/gi;
   const toolCalls = [];
   let invokeMatch;
   while ((invokeMatch = invokeRe.exec(block)) !== null) {
@@ -219,10 +231,10 @@ function parseAnyToolCallBlock(block) {
     const toolCall = parseMcpToolCallBlock(block);
     return toolCall ? [toolCall] : [];
   }
-  if (blockLower.includes('<function_calls')) {
+  if (blockLower.includes('<function_calls') || blockLower.includes('<function_calls')) {
     return parseFunctionCallsBlock(block);
   }
-  if (blockLower.includes('<invoke')) {
+  if (blockLower.includes('<invoke') || blockLower.includes('<invoke')) {
     const toolCall = parseInvokeBlock(block);
     return toolCall ? [toolCall] : [];
   }
@@ -300,15 +312,18 @@ function splitStreamTextForMcpToolCalls(text) {
   }
 
   // Check for partial <mcp_tool_call>, <function_calls>, or <tool_call> tags
+  // Also check for antml: namespace variants
   const mcpStartIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
   const funcStartIndex = trailing.indexOf(FUNCTION_CALLS_START_TAG);
+  const antmlFuncStartIndex = trailing.indexOf(ANTML_FUNCTION_CALLS_START_TAG);
   const toolCallStartIndex = trailing.indexOf(TOOL_CALL_JSON_START_TAG);
   const toolUseStartIndex = trailing.indexOf(TOOL_USE_START_TAG);
   const invokeStartIndex = trailing.indexOf(INVOKE_START_TAG);
+  const antmlInvokeStartIndex = trailing.indexOf(ANTML_INVOKE_START_TAG);
 
   // Find the earliest partial tag
   let startIndex = -1;
-  const indices = [mcpStartIndex, funcStartIndex, toolCallStartIndex, toolUseStartIndex, invokeStartIndex]
+  const indices = [mcpStartIndex, funcStartIndex, antmlFuncStartIndex, toolCallStartIndex, toolUseStartIndex, invokeStartIndex, antmlInvokeStartIndex]
     .filter(i => i !== -1);
   if (indices.length > 0) {
     startIndex = Math.min(...indices);
@@ -321,15 +336,17 @@ function splitStreamTextForMcpToolCalls(text) {
     return { segments, remainder: trailing.slice(startIndex) };
   }
 
-  // Check for partial tag at end (e.g., "<mcp_tool" or "<function" or "<tool_c")
+  // Check for partial tag at end (e.g., "<mcp_tool" or "<function" or "<tool_c" or "<")
   const lastLt = trailing.lastIndexOf('<');
   if (lastLt !== -1) {
     const possibleTag = trailing.slice(lastLt);
     if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag) ||
         FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
+        ANTML_FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
         TOOL_CALL_JSON_START_TAG.startsWith(possibleTag) ||
         TOOL_USE_START_TAG.startsWith(possibleTag) ||
-        INVOKE_START_TAG.startsWith(possibleTag)) {
+        INVOKE_START_TAG.startsWith(possibleTag) ||
+        ANTML_INVOKE_START_TAG.startsWith(possibleTag)) {
       if (lastLt > 0) {
         segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
       }

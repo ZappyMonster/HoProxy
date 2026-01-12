@@ -152,7 +152,7 @@ Since HopGPT doesn't natively pass Anthropic tools to the Claude model, HoProxy 
 
 ### Supported Tool Call Formats
 
-HoProxy supports three XML formats for tool calls in model responses:
+HoProxy supports four XML formats for tool calls in model responses:
 
 **1. MCP Tool Call Format:**
 ```xml
@@ -177,7 +177,19 @@ HoProxy supports three XML formats for tool calls in model responses:
 </function_calls>
 ```
 
-**3. Tool Call JSON Format (OpenCode):**
+**3. Claude Code Function Calls Format (antml: namespace):**
+```xml
+<function_calls>
+<invoke name="Bash">
+<parameter name="command">git status</parameter>
+</invoke>
+<invoke name="Read">
+<parameter name="file_path">README.md</parameter>
+</invoke>
+</function_calls>
+```
+
+**4. Tool Call JSON Format (OpenCode):**
 ```xml
 <tool_call>
 {"name": "Task", "parameters": {"task": "Explore the codebase", "agent": "explorer"}}
