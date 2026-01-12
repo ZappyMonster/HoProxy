@@ -27,7 +27,8 @@ export class HopGPTClient {
     this.isRefreshing = false;
     this.refreshPromise = null;  // Promise-based mutex for concurrent refresh
     // Proactive refresh buffer: refresh this many seconds before expiration
-    this.proactiveRefreshBufferSec = config.proactiveRefreshBufferSec ?? 60;
+    // Increased from 60 to 300 (5 minutes) to handle network latency and concurrent requests
+    this.proactiveRefreshBufferSec = config.proactiveRefreshBufferSec ?? 300;
     
     // Auto-persist credentials to .env after refresh
     this.autoPersist = config.autoPersist !== false;
@@ -414,7 +415,11 @@ export class HopGPTClient {
    */
   async _doRefreshTokens() {
     this.isRefreshing = true;
+    const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
     console.log('[HopGPT] Attempting to refresh tokens...');
+    console.log('[HopGPT] Refresh token info:', refreshTokenInfo ?
+      `expires in ${Math.round(refreshTokenInfo.expiresInSeconds / 3600)}h, expired: ${refreshTokenInfo.isExpired}` :
+      'no valid refresh token');
 
     try {
       const url = `${this.baseURL}/api/auth/refresh`;
@@ -448,7 +453,8 @@ export class HopGPTClient {
 
       if (!response.ok) {
         const errorText = response.body;
-        console.error(`[HopGPT] Token refresh failed: ${response.status} ${response.statusText}`, errorText);
+        console.error(`[HopGPT] Token refresh failed: ${response.status} ${response.statusText}`);
+        console.error(`[HopGPT] Refresh error response body:`, errorText);
         return false;
       }
 
@@ -457,16 +463,35 @@ export class HopGPTClient {
 
       if (data.token) {
         this.bearerToken = data.token;
+        const newTokenInfo = this._getTokenExpiryInfo(data.token);
         console.log('[HopGPT] Bearer token refreshed successfully');
+        console.log('[HopGPT] New bearer token expires in:', newTokenInfo ? `${newTokenInfo.expiresInSeconds}s` : 'unknown');
+      } else {
+        console.error('[HopGPT] Refresh response did not contain token:', JSON.stringify(data));
       }
 
       // Update cookies from Set-Cookie headers (includes rotated refresh token)
       const oldRefreshToken = this.cookies.refreshToken;
+      
+      // Debug: Log raw Set-Cookie headers
+      const setCookieHeaders = response.headers['set-cookie'] || response.headers['Set-Cookie'];
+      if (setCookieHeaders) {
+        console.log('[HopGPT] Received Set-Cookie headers:', 
+          Array.isArray(setCookieHeaders) ? setCookieHeaders.length + ' cookies' : 'single cookie');
+      } else {
+        console.log('[HopGPT] No Set-Cookie headers in refresh response');
+      }
+      
       this.updateCookiesFromTLSResponse(response.headers);
 
       // Check if refresh token was rotated
       if (this.cookies.refreshToken && this.cookies.refreshToken !== oldRefreshToken) {
         console.log('[HopGPT] Refresh token was rotated by server');
+        const newRefreshInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
+        console.log('[HopGPT] New refresh token expires in:', 
+          newRefreshInfo ? `${Math.round(newRefreshInfo.expiresInSeconds / 3600)}h` : 'unknown');
+      } else if (!this.cookies.refreshToken) {
+        console.warn('[HopGPT] WARNING: No refresh token after refresh - this will cause future refreshes to fail!');
       }
 
       // Persist new credentials to .env so they survive server restarts
@@ -559,6 +584,10 @@ export class HopGPTClient {
   ) {
     // Proactively refresh token if needed (before making the request)
     if (!retryState.isAuthRetry) {
+      const tokenInfo = this._getTokenExpiryInfo(this.bearerToken);
+      if (tokenInfo && tokenInfo.expiresInSeconds <= this.proactiveRefreshBufferSec + 60) {
+        console.log(`[HopGPT] Token expires in ${tokenInfo.expiresInSeconds}s, buffer is ${this.proactiveRefreshBufferSec}s`);
+      }
       await this.ensureValidToken();
     }
 
@@ -668,12 +697,20 @@ export class HopGPTClient {
 
       // Check if this is an auth error and we can retry
       if ((response.status === 401 || response.status === 403) && this.autoRefresh && !retryState.isAuthRetry) {
-        console.log(`[HopGPT] Auth error (${response.status}), attempting token refresh...`);
+        const tokenInfo = this._getTokenExpiryInfo(this.bearerToken);
+        console.log(`[HopGPT] Auth error (${response.status})`);
+        console.log(`[HopGPT] Response body: ${errorText}`);
+        console.log(`[HopGPT] Bearer token info:`, tokenInfo ? 
+          `expires in ${tokenInfo.expiresInSeconds}s, expired: ${tokenInfo.isExpired}` : 
+          'no valid token');
+        console.log(`[HopGPT] Attempting token refresh...`);
 
         const refreshed = await this.refreshTokens();
         if (refreshed) {
           console.log('[HopGPT] Retrying request with new token...');
           return this.sendMessage(hopGPTRequest, requestOptions, { ...retryState, isAuthRetry: true });
+        } else {
+          console.log('[HopGPT] Token refresh failed, not retrying');
         }
       }
 
