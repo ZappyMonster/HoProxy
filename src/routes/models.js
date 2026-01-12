@@ -73,9 +73,16 @@ router.get('/models', (req, res) => {
 /**
  * GET /v1/models/:model_id
  * Returns a specific model by ID
+ * Supports model IDs with provider prefix (e.g., anthropic/claude-opus-4-5-thinking)
  */
-router.get('/models/:model_id', (req, res) => {
-  const requestedId = req.params.model_id;
+router.get('/models/*', (req, res) => {
+  // Handle model IDs that may contain slashes (e.g., anthropic/claude-opus-4-5-thinking)
+  let requestedId = req.params[0];
+
+  // Strip provider prefix if present (e.g., "anthropic/claude-opus-4-5-thinking" -> "claude-opus-4-5-thinking")
+  if (requestedId.includes('/')) {
+    requestedId = requestedId.split('/').pop();
+  }
   let model = AVAILABLE_MODELS.find(m => m.id === requestedId);
 
   if (!model) {
