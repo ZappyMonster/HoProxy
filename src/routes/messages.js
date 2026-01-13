@@ -196,6 +196,16 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
       return transformer.transformEvent(event);
     }, abortController.signal);
 
+    // Ensure the stream is properly terminated even if HopGPT didn't send a final event
+    // This prevents clients from hanging indefinitely waiting for message_stop
+    if (!transformer.hasEnded() && !clientDisconnected && !res.writableEnded) {
+      const cleanupEvents = transformer.forceEnd();
+      for (const evt of cleanupEvents) {
+        res.write(`event: ${evt.event}\n`);
+        res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
+      }
+    }
+
     // Update conversation state BEFORE ending response to prevent race condition
     // where Claude Code makes another request before state is updated
     const nextState = transformer.getConversationState();

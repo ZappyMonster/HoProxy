@@ -909,4 +909,102 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(input.todos[1].id).toBe('2');
     expect(input.todos[2].id).toBe('3');
   });
+
+  it('forceEnd emits message_stop when stream ends without final event', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Simulate a stream that starts but never receives a final event
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'Hello world' }
+          ]
+        }
+      }
+    });
+
+    // Stream hasn't ended yet
+    expect(transformer.hasEnded()).toBe(false);
+
+    // Force end the stream (simulating what happens when HopGPT closes without final event)
+    const cleanupEvents = transformer.forceEnd();
+
+    // Should emit message_delta and message_stop
+    expect(cleanupEvents.length).toBeGreaterThan(0);
+    const messageStop = cleanupEvents.find(evt => evt.event === 'message_stop');
+    expect(messageStop).toBeTruthy();
+    expect(messageStop.data.type).toBe('message_stop');
+
+    // Should have a message_delta with stop_reason
+    const messageDelta = cleanupEvents.find(evt => evt.event === 'message_delta');
+    expect(messageDelta).toBeTruthy();
+    expect(messageDelta.data.delta.stop_reason).toBe('end_turn');
+
+    // Now hasEnded should return true
+    expect(transformer.hasEnded()).toBe(true);
+
+    // Calling forceEnd again should return empty array (idempotent)
+    const secondCall = transformer.forceEnd();
+    expect(secondCall).toEqual([]);
+  });
+
+  it('forceEnd flushes buffered partial tool calls as text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    // Send text that contains a partial tool call tag (never closed)
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'Use <tool_use to call tools' }
+          ]
+        }
+      }
+    });
+
+    // Force end without final event
+    const cleanupEvents = transformer.forceEnd();
+
+    // The partial tool call should be flushed as text
+    const textDeltas = cleanupEvents.filter(
+      evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta'
+    );
+    const allText = textDeltas.map(evt => evt.data.delta.text).join('');
+    expect(allText).toContain('<tool_use');
+
+    // Should still have message_stop
+    const messageStop = cleanupEvents.find(evt => evt.event === 'message_stop');
+    expect(messageStop).toBeTruthy();
+  });
 });
