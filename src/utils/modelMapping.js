@@ -7,36 +7,28 @@ const log = loggers.model;
 // - hopgpt: The model ID used when calling HopGPT backend
 // - aliases: Alternative names that clients might use (all resolve to the same model)
 //
-// IMPORTANT: Canonical names should NOT include "-thinking" suffix.
-// Clients like OpenCode validate model names and reject unknown IDs.
-// Thinking mode is enabled internally based on model capabilities, not the model name.
+// IMPORTANT: Do NOT include "-thinking" suffix in canonical or aliases.
+// Clients like OpenCode validate model names against Anthropic's official list,
+// and "-thinking" variants are not recognized, causing ProviderModelNotFoundError.
+// The proxy enables thinking mode internally based on model capabilities.
+//
+// Note: The addModelVariants() function below automatically handles -thinking
+// variants for INPUT resolution, so users can still request "-thinking" models.
 const MODEL_MAPPINGS = Object.freeze([
   {
     canonical: 'claude-opus-4-5',
     hopgpt: 'claude-opus-4.5',
-    aliases: [
-      'claude-opus-4.5',
-      'claude-opus-4-5-thinking',
-      'claude-opus-4.5-thinking'
-    ]
+    aliases: ['claude-opus-4.5']
   },
   {
     canonical: 'claude-sonnet-4-5',
     hopgpt: 'claude-sonnet-4.5',
-    aliases: [
-      'claude-sonnet-4.5',
-      'claude-sonnet-4-5-thinking',
-      'claude-sonnet-4.5-thinking'
-    ]
+    aliases: ['claude-sonnet-4.5']
   },
   {
     canonical: 'claude-haiku-4-5',
     hopgpt: 'claude-haiku-4.5',
-    aliases: [
-      'claude-haiku-4.5',
-      'claude-haiku-4-5-thinking',
-      'claude-haiku-4.5-thinking'
-    ]
+    aliases: ['claude-haiku-4.5']
   }
 ]);
 

@@ -9,9 +9,10 @@ const router = Router();
  * Available models in HopGPT
  * Format compatible with Anthropic's model list API
  *
- * IMPORTANT: Model IDs should match what clients expect (standard Anthropic-style names).
- * Clients like OpenCode validate model names and reject unknown IDs like "-thinking" variants.
- * The proxy handles thinking mode internally based on model capabilities, not the model ID.
+ * IMPORTANT: Model IDs must NOT include "-thinking" suffix.
+ * Clients like OpenCode validate model names against Anthropic's official list,
+ * and "-thinking" variants cause ProviderModelNotFoundError.
+ * The proxy enables thinking mode internally based on model capabilities.
  */
 const CANONICAL_MODELS = [
   {
@@ -94,7 +95,10 @@ const ALL_MODELS = [
  * Returns list of available models
  */
 router.get('/models', (req, res) => {
-  log.debug('Listing models', { count: ALL_MODELS.length });
+  log.info('MODELS ENDPOINT CALLED - returning model list', {
+    count: ALL_MODELS.length,
+    modelIds: ALL_MODELS.map(m => m.id)
+  });
   res.json({
     object: 'list',
     data: ALL_MODELS,
