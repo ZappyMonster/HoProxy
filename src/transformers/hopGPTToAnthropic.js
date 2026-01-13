@@ -703,11 +703,6 @@ export class HopGPTToAnthropicTransformer {
             continue;
           }
           if (segment.type === 'tool_call') {
-            // Skip tool_use blocks with empty or missing names to prevent client UI crashes
-            if (!segment.toolCall.toolName) {
-              log.warn('Skipping tool_call segment with empty name in _extractFinalContent', { segment });
-              continue;
-            }
             this.hasToolUse = true;
             this.contentBlocks.push({
               type: 'tool_use',
@@ -718,12 +713,6 @@ export class HopGPTToAnthropicTransformer {
           }
         }
       } else if (block.type === 'tool_use') {
-        // Skip tool_use blocks with empty or missing names to prevent client UI crashes
-        if (!block.name) {
-          log.warn('Skipping tool_use block with empty name in _extractFinalContent', { block });
-          continue;
-        }
-
         this.hasToolUse = true;
         let input = block.input;
 
@@ -739,7 +728,7 @@ export class HopGPTToAnthropicTransformer {
         this.contentBlocks.push({
           type: 'tool_use',
           id: block.id || generateToolUseId(),
-          name: block.name,
+          name: block.name || '',
           input: input || {}
         });
       }
@@ -789,17 +778,10 @@ export class HopGPTToAnthropicTransformer {
 
   _processToolUseBlock(block) {
     const events = [];
+    this.hasToolUse = true;
 
     const toolId = block.id || (this.currentToolUse?.id);
     const toolName = block.name || (this.currentToolUse?.name);
-
-    // Skip tool_use blocks with empty or missing names to prevent client UI crashes
-    if (!toolName) {
-      log.warn('Skipping tool_use block with empty name', { toolId, block });
-      return events;
-    }
-
-    this.hasToolUse = true;
 
     if (this.blockStarted && (this.currentBlockType !== 'tool_use' ||
         (this.currentToolUse && this.currentToolUse.id !== toolId))) {
@@ -1159,11 +1141,6 @@ export class HopGPTToAnthropicTransformer {
 
       // Add accumulated tool uses
       for (const toolUse of this.accumulatedToolUses) {
-        // Skip tool_use blocks with empty or missing names to prevent client UI crashes
-        if (!toolUse.name) {
-          log.warn('Skipping accumulated tool use with empty name in buildNonStreamingResponse', { toolUse });
-          continue;
-        }
         let input = {};
         if (toolUse.inputJson) {
           try {
