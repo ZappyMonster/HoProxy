@@ -1,4 +1,7 @@
 import { createParser } from 'eventsource-parser';
+import { loggers } from './logger.js';
+
+const log = loggers.transform;
 
 /**
  * Parse an SSE stream from a fetch response
@@ -58,6 +61,15 @@ export async function pipeSSEStream(fetchResponse, res, transformEvent, signal) 
           if (res.writableEnded || res.destroyed) {
             return;
           }
+
+          // DIAGNOSTIC: Log the first message_start event to verify model name
+          if (evt.event === 'message_start') {
+            log.info('SSE DIAGNOSTIC - message_start sent to client', {
+              model: evt.data?.message?.model,
+              messageId: evt.data?.message?.id
+            });
+          }
+
           res.write(`event: ${evt.event}\n`);
           res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
           if (typeof res.flush === 'function') {
