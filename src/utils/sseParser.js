@@ -37,9 +37,10 @@ export async function parseSSEStream(response, onEvent) {
  * @param {Response} fetchResponse - Fetch response with SSE body
  * @param {object} res - Express response object
  * @param {function} transformEvent - Function to transform each event
+ * @param {AbortSignal} [signal] - Optional abort signal to cancel streaming
  * @returns {Promise<object>} Final transformer state
  */
-export async function pipeSSEStream(fetchResponse, res, transformEvent) {
+export async function pipeSSEStream(fetchResponse, res, transformEvent, signal) {
   const parser = createParser((event) => {
     if (event.type === 'event') {
       const parsedEvent = {
@@ -53,6 +54,10 @@ export async function pipeSSEStream(fetchResponse, res, transformEvent) {
         const events = Array.isArray(transformedEvents) ? transformedEvents : [transformedEvents];
 
         for (const evt of events) {
+          // Check if response is still writable before writing
+          if (res.writableEnded || res.destroyed) {
+            return;
+          }
           res.write(`event: ${evt.event}\n`);
           res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
           if (typeof res.flush === 'function') {
@@ -68,6 +73,12 @@ export async function pipeSSEStream(fetchResponse, res, transformEvent) {
 
   try {
     while (true) {
+      // Check if aborted before reading next chunk
+      if (signal?.aborted) {
+        await reader.cancel();
+        break;
+      }
+
       const { done, value } = await reader.read();
       if (done) break;
 

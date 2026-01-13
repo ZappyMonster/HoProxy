@@ -113,15 +113,24 @@ describe('messages routes', () => {
 
     const app = createApp();
     const requestBody = await readFixture('anthropic-request-tools.json');
+    
+    // Use custom parser for SSE streams to handle req.on('close') listener properly
     const response = await request(app)
       .post('/v1/messages')
-      .send(requestBody);
+      .send(requestBody)
+      .buffer(false)
+      .parse((res, callback) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk.toString(); });
+        res.on('end', () => callback(null, data));
+        res.on('error', callback);
+      });
 
     expect(response.status).toBe(200);
     expect(response.headers['content-type']).toContain('text/event-stream');
-    expect(response.text).toContain('event: message_start');
-    expect(response.text).toContain('event: content_block_delta');
-    expect(response.text).toContain('event: message_stop');
+    expect(response.body).toContain('event: message_start');
+    expect(response.body).toContain('event: content_block_delta');
+    expect(response.body).toContain('event: message_stop');
   });
 
   it('converts HopGPT errors to Anthropic error formats', async () => {
