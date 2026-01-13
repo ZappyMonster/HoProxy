@@ -667,15 +667,15 @@ describe('hopGPTToAnthropic transformer', () => {
     };
 
     // Claude Code format with antml: namespace
-    const functionCalls = `<function_calls>
-<invoke name="Bash">
-<parameter name="command">git status</parameter>
-<parameter name="description">Show git status</parameter>
-</invoke>
-<invoke name="Read">
-<parameter name="file_path">/path/to/file.js</parameter>
-</invoke>
-</function_calls>`;
+    const functionCalls = `<antml:function_calls>
+<antml:invoke name="Bash">
+<antml:parameter name="command">git status</antml:parameter>
+<antml:parameter name="description">Show git status</antml:parameter>
+</antml:invoke>
+<antml:invoke name="Read">
+<antml:parameter name="file_path">/path/to/file.js</antml:parameter>
+</antml:invoke>
+</antml:function_calls>`;
 
     pushEvents({ created: true, message: { id: 'msg-create' } });
     pushEvents({
@@ -706,8 +706,8 @@ describe('hopGPTToAnthropic transformer', () => {
       .join('');
     expect(textDeltas).toContain('Let me check the status:');
     expect(textDeltas).toContain('Done.');
-    expect(textDeltas).not.toContain('<function_calls>');
-    expect(textDeltas).not.toContain('<invoke');
+    expect(textDeltas).not.toContain('<antml:function_calls>');
+    expect(textDeltas).not.toContain('<antml:invoke');
 
     // Both tool_use blocks should be created
     const toolStarts = events.filter(evt =>

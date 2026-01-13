@@ -96,7 +96,7 @@ Create or edit `~/.claude/settings.json`:
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "test",
     "ANTHROPIC_BASE_URL": "http://localhost:3001",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5-thinking"
+    "ANTHROPIC_MODEL": "claude-sonnet-4.5"
   }
 }
 ```
@@ -109,7 +109,7 @@ If you prefer shell environment variables instead of `settings.json`:
 ```bash
 export ANTHROPIC_AUTH_TOKEN=test
 export ANTHROPIC_BASE_URL=http://localhost:3001
-export ANTHROPIC_MODEL=claude-sonnet-4-5-thinking
+export ANTHROPIC_MODEL=claude-sonnet-4.5
 ```
 
 ### 5) Troubleshooting common issues
@@ -124,16 +124,16 @@ export ANTHROPIC_MODEL=claude-sonnet-4-5-thinking
 
 ### 6) Available models and their capabilities
 
-| Model (canonical) | HopGPT backend | Capability notes | Max tokens |
-|-------------------|----------------|------------------|------------|
-| `claude-opus-4-5-thinking` | `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. | 32768 |
-| `claude-sonnet-4-5-thinking` | `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. | 16384 |
-| `claude-haiku-4-5-thinking` | `claude-haiku-4.5` | Fastest model; best for low-latency tasks. | 8192 |
+| Model (canonical) | Capability notes |
+|-------------------|------------------|
+| `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. |
+| `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. |
+| `claude-haiku-4.5` | Fastest model; best for low-latency tasks. |
 
 Aliases accepted by the proxy include:
-- `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4.5-thinking`
-- `claude-sonnet-4-5`, `claude-sonnet-4.5`, `claude-sonnet-4.5-thinking`
-- `claude-haiku-4-5`, `claude-haiku-4.5`, `claude-haiku-4.5-thinking`
+- `claude-opus-4-5`, `claude-opus-4-5-thinking`, `claude-opus-4.5-thinking`, `claude-4-5-opus`, `claude-4.5-opus`, `opus-4-5`, `opus-4.5`
+- `claude-sonnet-4-5`, `claude-sonnet-4-5-thinking`, `claude-sonnet-4.5-thinking`, `claude-4-5-sonnet`, `claude-4.5-sonnet`, `sonnet-4-5`, `sonnet-4.5`
+- `claude-haiku-4-5`, `claude-haiku-4-5-thinking`, `claude-haiku-4.5-thinking`, `claude-4-5-haiku`, `claude-4.5-haiku`, `haiku-4-5`, `haiku-4.5`
 
 ## OpenCode Setup
 
@@ -268,7 +268,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-4-5-thinking",
+    model="claude-sonnet-4.5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -286,7 +286,7 @@ const client = new Anthropic({
 });
 
 const message = await client.messages.create({
-  model: 'claude-sonnet-4-5-thinking',
+  model: 'claude-sonnet-4.5',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Hello!' }]
 });
@@ -302,7 +302,7 @@ If your SDK version does not support `baseURL`, use the `curl` example below ins
 curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-5-thinking",
+    "model": "claude-sonnet-4.5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -347,6 +347,11 @@ curl -X POST http://localhost:3001/refresh-token
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
 | `CONVERSATION_TTL_MS` | In-memory conversation state TTL in ms (default: 21600000) |
 | `HOPGPT_DEBUG` | Enable debug logging for troubleshooting (default: unset) |
+| `HOPGPT_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `HOPGPT_LOG_NO_COLOR` | Disable colored log output (default: unset) |
+| `NO_COLOR` | Standard env var to disable colored output (default: unset) |
+| `HOPGPT_STREAMING_TRANSPORT` | Streaming transport: `fetch` or `tls` (default: `fetch`) |
+| `SIGNATURE_CACHE_TTL_MS` | Tool signature cache TTL in ms (default: 3600000) |
 
 Extraction-only:
 - `HOPGPT_PUPPETEER_CHANNEL`
@@ -407,19 +412,23 @@ HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 ```
 src/
 ├── index.js                    # Express server entry point
+├── extract-credentials.js      # Puppeteer credential extraction script (npm run extract)
 ├── routes/
 │   ├── messages.js             # /v1/messages endpoint
 │   ├── models.js               # /v1/models endpoints
 │   └── refreshToken.js         # /refresh-token endpoint
 ├── transformers/
 │   ├── anthropicToHopGPT.js    # Request transformation
-│   └── hopGPTToAnthropic.js    # SSE response transformation
+│   ├── hopGPTToAnthropic.js    # SSE response transformation
+│   ├── signatureCache.js       # Tool signature caching
+│   └── thinkingUtils.js        # Thinking block utilities
 ├── services/
-│   ├── browserCredentials.js   # Puppeteer credential extraction
+│   ├── browserCredentials.js   # Browser credential helpers
 │   ├── conversationStore.js    # In-memory session storage
 │   ├── hopgptClient.js         # HopGPT API client
 │   └── tlsClient.js            # TLS fingerprinted requests
 └── utils/
+    ├── logger.js               # Logging utility
     ├── modelMapping.js         # Model alias mapping
     └── sseParser.js            # SSE stream parsing
 ```

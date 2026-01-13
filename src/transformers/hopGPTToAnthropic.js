@@ -12,7 +12,7 @@ const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call';
 // Also matches <function_calls> used by Claude Code
 const FUNCTION_CALLS_BLOCK_RE = /<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>/gi;
 const FUNCTION_CALLS_START_TAG = '<function_calls';
-const ANTML_FUNCTION_CALLS_START_TAG = '<function_calls';
+const ANTML_FUNCTION_CALLS_START_TAG = '<antml:function_calls';
 
 // Pattern for <tool_call> blocks with JSON (another OpenCode format)
 const TOOL_CALL_JSON_BLOCK_RE = /<tool_call\b[\s\S]*?<\/tool_call>/gi;
@@ -25,7 +25,7 @@ const TOOL_USE_START_TAG = '<tool_use';
 // Also matches <invoke> used by Claude Code
 const INVOKE_BLOCK_RE = /<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>/gi;
 const INVOKE_START_TAG = '<invoke';
-const ANTML_INVOKE_START_TAG = '<invoke';
+const ANTML_INVOKE_START_TAG = '<antml:invoke';
 
 // Combined pattern for any tool call format
 // Includes antml: namespace variants used by Claude Code
@@ -233,10 +233,10 @@ function parseAnyToolCallBlock(block) {
     const toolCall = parseMcpToolCallBlock(block);
     return toolCall ? [toolCall] : [];
   }
-  if (blockLower.includes('<function_calls') || blockLower.includes('<function_calls')) {
+  if (blockLower.includes('<function_calls') || blockLower.includes('<antml:function_calls')) {
     return parseFunctionCallsBlock(block);
   }
-  if (blockLower.includes('<invoke') || blockLower.includes('<invoke')) {
+  if (blockLower.includes('<invoke') || blockLower.includes('<antml:invoke')) {
     const toolCall = parseInvokeBlock(block);
     return toolCall ? [toolCall] : [];
   }
@@ -610,10 +610,12 @@ export class HopGPTToAnthropicTransformer {
 
       // Debug: Log incoming text for tool call detection
       if (process.env.HOPGPT_DEBUG === 'true') {
-        const hasToolCallTag = block.text.includes('<tool_call>') ||
-                               block.text.includes('<function_calls>') ||
-                               block.text.includes('<mcp_tool_call>') ||
-                               block.text.includes('<tool_use');
+        const hasToolCallTag = block.text.includes('<tool_call') ||
+                               block.text.includes('<function_calls') ||
+                               block.text.includes('<antml:function_calls') ||
+                               block.text.includes('<mcp_tool_call') ||
+                               block.text.includes('<tool_use') ||
+                               block.text.includes('<antml:invoke');
         if (hasToolCallTag) {
           console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
         }
