@@ -87,6 +87,114 @@ function parseEmbeddedJson(value) {
   return value;
 }
 
+/**
+ * Repair malformed JSON where array brackets are missing.
+ * Fixes patterns like: {"key": {"id": "1"}, {"id": "2"}}
+ * To become: {"key": [{"id": "1"}, {"id": "2"}]}
+ *
+ * This commonly happens when models output tool calls with array parameters
+ * but omit the array brackets.
+ */
+function repairMalformedArrayJson(jsonStr) {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+
+  // Pattern: a key followed by an object, then comma and another object without array brackets
+  // e.g., "key": {"a": 1}, {"b": 2} should become "key": [{"a": 1}, {"b": 2}]
+  //
+  // Strategy: Find patterns where we have }: followed by whitespace and {
+  // which indicates adjacent objects that should be in an array
+
+  let result = jsonStr;
+
+  // Look for pattern: "key": {object}, {object}...}
+  // The regex finds a key followed by objects separated by }, {
+  // We need to wrap those objects in array brackets
+
+  // First, try to find keys whose values are malformed arrays
+  // Pattern: "key": {first object}, {second object}, ... }
+  // The issue is after "key": we have {obj}, {obj} instead of [{obj}, {obj}]
+
+  const keyValuePattern = /"([^"]+)":\s*(\{)/g;
+  let match;
+  let modifications = [];
+
+  while ((match = keyValuePattern.exec(jsonStr)) !== null) {
+    const keyName = match[1];
+    const startOfValue = match.index + match[0].length - 1; // Position of first {
+
+    // Try to find if this is a malformed array by checking what comes after the first object
+    // We need to find matching braces
+    let braceCount = 0;
+    let i = startOfValue;
+    let firstObjEnd = -1;
+
+    // Find the end of the first object
+    for (; i < jsonStr.length; i++) {
+      if (jsonStr[i] === '{') braceCount++;
+      else if (jsonStr[i] === '}') {
+        braceCount--;
+        if (braceCount === 0) {
+          firstObjEnd = i;
+          break;
+        }
+      }
+    }
+
+    if (firstObjEnd === -1) continue;
+
+    // Check if there's a comma followed by another object immediately after
+    let afterFirstObj = jsonStr.slice(firstObjEnd + 1).match(/^\s*,\s*\{/);
+    if (afterFirstObj) {
+      // This looks like a malformed array - we have }, { pattern
+      // Find where the array should end (the closing } of the parent object or end of string)
+
+      // Find all consecutive objects
+      let arrayEnd = firstObjEnd;
+      let pos = firstObjEnd + 1;
+
+      while (pos < jsonStr.length) {
+        // Skip whitespace and comma
+        const remaining = jsonStr.slice(pos);
+        const nextObjMatch = remaining.match(/^\s*,\s*\{/);
+        if (!nextObjMatch) break;
+
+        pos += nextObjMatch[0].length - 1; // Position at the {
+
+        // Find end of this object
+        braceCount = 0;
+        for (let j = pos; j < jsonStr.length; j++) {
+          if (jsonStr[j] === '{') braceCount++;
+          else if (jsonStr[j] === '}') {
+            braceCount--;
+            if (braceCount === 0) {
+              arrayEnd = j;
+              pos = j + 1;
+              break;
+            }
+          }
+        }
+      }
+
+      // Now we know the array should span from startOfValue to arrayEnd
+      modifications.push({
+        insertOpenBracket: startOfValue,
+        insertCloseBracket: arrayEnd + 1
+      });
+    }
+  }
+
+  // Apply modifications in reverse order to preserve positions
+  modifications.sort((a, b) => b.insertCloseBracket - a.insertCloseBracket);
+  for (const mod of modifications) {
+    result = result.slice(0, mod.insertCloseBracket) + ']' + result.slice(mod.insertCloseBracket);
+    result = result.slice(0, mod.insertOpenBracket) + '[' + result.slice(mod.insertOpenBracket);
+  }
+
+  return result;
+}
+
 function parseMcpToolCallBlock(block) {
   const serverName = extractXmlTagValue(block, 'server_name');
   const toolName = extractXmlTagValue(block, 'tool_name');
@@ -98,11 +206,18 @@ function parseMcpToolCallBlock(block) {
 
   let parsedArgs = {};
   if (argsText && argsText.trim().length > 0) {
+    const trimmedArgs = argsText.trim();
     try {
-      parsedArgs = JSON.parse(argsText.trim());
+      parsedArgs = JSON.parse(trimmedArgs);
     } catch (error) {
-      log.warn('Failed to parse MCP tool call arguments', { error: error.message });
-      parsedArgs = { _raw: argsText.trim() };
+      // Try to repair malformed JSON (e.g., missing array brackets)
+      try {
+        const repaired = repairMalformedArrayJson(trimmedArgs);
+        parsedArgs = JSON.parse(repaired);
+      } catch (repairError) {
+        log.warn('Failed to parse MCP tool call arguments', { error: error.message });
+        parsedArgs = { _raw: trimmedArgs };
+      }
     }
   }
 
@@ -174,8 +289,15 @@ function parseToolCallJsonBlock(block) {
   }
 
   try {
-    const cleanedContent = stripCdata(jsonContent);
-    const parsed = JSON.parse(cleanedContent.trim());
+    const cleanedContent = stripCdata(jsonContent).trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanedContent);
+    } catch (parseError) {
+      // Try to repair malformed JSON (e.g., missing array brackets)
+      const repaired = repairMalformedArrayJson(cleanedContent);
+      parsed = JSON.parse(repaired);
+    }
     const toolName = parsed.name;
     const args = parsed.parameters || parsed.arguments || parsed.input || {};
     const normalizedArgs = parseEmbeddedJson(args);
@@ -209,10 +331,18 @@ function parseToolUseBlock(block) {
   let parsedArgs = {};
 
   if (inputText && inputText.length > 0) {
+    const trimmedInput = inputText.trim();
     try {
-      parsedArgs = JSON.parse(inputText.trim());
+      parsedArgs = JSON.parse(trimmedInput);
     } catch (error) {
-      parsedArgs = inputText.trim();
+      // Try to repair malformed JSON (e.g., missing array brackets)
+      try {
+        const repaired = repairMalformedArrayJson(trimmedInput);
+        parsedArgs = JSON.parse(repaired);
+      } catch (repairError) {
+        // If all parsing fails, keep as raw string
+        parsedArgs = trimmedInput;
+      }
     }
   }
 
