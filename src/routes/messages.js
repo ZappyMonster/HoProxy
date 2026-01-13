@@ -10,7 +10,7 @@ import {
   resetConversationState
 } from '../services/conversationStore.js';
 import { pipeSSEStream, parseSSEStream } from '../utils/sseParser.js';
-import { resolveModelMapping } from '../utils/modelMapping.js';
+import { resolveModelMapping, stripProviderPrefix } from '../utils/modelMapping.js';
 import { loggers } from '../utils/logger.js';
 
 const log = loggers.messages;
@@ -71,7 +71,9 @@ router.post('/messages', async (req, res) => {
     }
 
     // Resolve model mapping for HopGPT and response model names
-    const modelMapping = resolveModelMapping(anthropicRequest.model);
+    const requestedModel = anthropicRequest.model;
+    const strippedModel = stripProviderPrefix(requestedModel);
+    const modelMapping = resolveModelMapping(strippedModel);
     if (!modelMapping.mapped && anthropicRequest.model) {
       log.warn(`Unmapped model "${anthropicRequest.model}", using as-is`);
     }
@@ -92,7 +94,7 @@ router.post('/messages', async (req, res) => {
 
     // Transform request
     const hopGPTRequest = transformAnthropicToHopGPT(anthropicRequest, conversationState);
-    hopGPTRequest.model = modelMapping.hopgptModel || hopGPTRequest.model;
+    hopGPTRequest.model = modelMapping.hopgptModel || strippedModel || hopGPTRequest.model;
 
     // Debug logging for transformed request
     log.debug('Request transformed', {

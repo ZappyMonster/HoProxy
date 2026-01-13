@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { loggers } from '../utils/logger.js';
-import { MODEL_MAPPINGS, resolveModelMapping } from '../utils/modelMapping.js';
+import { MODEL_MAPPINGS, resolveModelMapping, stripProviderPrefix } from '../utils/modelMapping.js';
 
 const log = loggers.model;
 const router = Router();
@@ -58,15 +58,42 @@ const AVAILABLE_MODELS = [
   ...buildAliasModels()
 ];
 
+const PROVIDER_PREFIXES = ['anthropic'];
+
+function buildProviderPrefixedModels(models) {
+  const prefixedModels = [];
+  const seen = new Set(models.map(model => model.id));
+
+  for (const prefix of PROVIDER_PREFIXES) {
+    if (!prefix) continue;
+    for (const model of models) {
+      const prefixedId = `${prefix}/${model.id}`;
+      if (seen.has(prefixedId)) continue;
+      prefixedModels.push({
+        ...model,
+        id: prefixedId
+      });
+      seen.add(prefixedId);
+    }
+  }
+
+  return prefixedModels;
+}
+
+const ALL_MODELS = [
+  ...AVAILABLE_MODELS,
+  ...buildProviderPrefixedModels(AVAILABLE_MODELS)
+];
+
 /**
  * GET /v1/models
  * Returns list of available models
  */
 router.get('/models', (req, res) => {
-  log.debug('Listing models', { count: AVAILABLE_MODELS.length });
+  log.debug('Listing models', { count: ALL_MODELS.length });
   res.json({
     object: 'list',
-    data: AVAILABLE_MODELS,
+    data: ALL_MODELS,
   });
 });
 
@@ -77,12 +104,8 @@ router.get('/models', (req, res) => {
  */
 router.get('/models/*', (req, res) => {
   // Handle model IDs that may contain slashes (e.g., anthropic/claude-opus-4-5-thinking)
-  let requestedId = req.params[0];
-
-  // Strip provider prefix if present (e.g., "anthropic/claude-opus-4-5-thinking" -> "claude-opus-4-5-thinking")
-  if (requestedId.includes('/')) {
-    requestedId = requestedId.split('/').pop();
-  }
+  const rawId = req.params[0];
+  const requestedId = stripProviderPrefix(rawId);
   let model = AVAILABLE_MODELS.find(m => m.id === requestedId);
 
   if (!model) {
@@ -99,12 +122,12 @@ router.get('/models/*', (req, res) => {
   }
 
   if (!model) {
-    log.debug('Model not found', { modelId: req.params.model_id });
+    log.debug('Model not found', { modelId: rawId });
     return res.status(404).json({
       type: 'error',
       error: {
         type: 'not_found_error',
-        message: `Model not found: ${req.params.model_id}`
+        message: `Model not found: ${rawId}`
       }
     });
   }
