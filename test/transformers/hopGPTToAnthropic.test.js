@@ -786,4 +786,127 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(toolUseBlocks[0].input).toEqual({ command: 'npm test' });
     expect(response.stop_reason).toBe('tool_use');
   });
+
+  it('repairs malformed JSON with missing array brackets in tool_use blocks', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Malformed JSON where array brackets are missing around objects
+    // This is what models sometimes output incorrectly:
+    // {"todos": {"id": "1", ...}, {"id": "2", ...}} instead of
+    // {"todos": [{"id": "1", ...}, {"id": "2", ...}]}
+    const malformedToolUse = `<tool_use id="toolu_abc" name="todowrite">
+{"todos": {"id": "1", "content": "First task", "status": "completed"}, {"id": "2", "content": "Second task", "status": "pending"}}
+</tool_use>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: malformedToolUse }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    // Should successfully parse and repair the malformed JSON
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('todowrite');
+    expect(toolUseBlocks[0].id).toBe('toolu_abc');
+
+    // The repaired JSON should have the todos as an array
+    const input = toolUseBlocks[0].input;
+    expect(Array.isArray(input.todos)).toBe(true);
+    expect(input.todos.length).toBe(2);
+    expect(input.todos[0].id).toBe('1');
+    expect(input.todos[0].content).toBe('First task');
+    expect(input.todos[1].id).toBe('2');
+    expect(input.todos[1].content).toBe('Second task');
+  });
+
+  it('repairs malformed JSON with missing array brackets in tool_call blocks', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Malformed tool_call JSON format
+    const malformedToolCall = `<tool_call>
+{"name": "todowrite", "parameters": {"todos": {"id": "1", "content": "Task A", "status": "completed"}, {"id": "2", "content": "Task B", "status": "in_progress"}, {"id": "3", "content": "Task C", "status": "pending"}}}
+</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: malformedToolCall }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    // Should successfully parse and repair the malformed JSON
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('todowrite');
+
+    // The repaired JSON should have the todos as an array
+    const input = toolUseBlocks[0].input;
+    expect(Array.isArray(input.todos)).toBe(true);
+    expect(input.todos.length).toBe(3);
+    expect(input.todos[0].id).toBe('1');
+    expect(input.todos[1].id).toBe('2');
+    expect(input.todos[2].id).toBe('3');
+  });
 });
