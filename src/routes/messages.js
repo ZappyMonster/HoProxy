@@ -138,7 +138,7 @@ router.post('/messages', async (req, res) => {
     const transformer = new HopGPTToAnthropicTransformer(responseModel, transformerOptions);
 
     if (isStreaming) {
-      await handleStreamingRequest(client, hopGPTRequest, transformer, res, sessionId);
+      await handleStreamingRequest(client, hopGPTRequest, transformer, res, req, sessionId);
     } else {
       await handleNonStreamingRequest(client, hopGPTRequest, transformer, res, sessionId);
     }
@@ -150,7 +150,7 @@ router.post('/messages', async (req, res) => {
 /**
  * Handle streaming response
  */
-async function handleStreamingRequest(client, hopGPTRequest, transformer, res, sessionId) {
+async function handleStreamingRequest(client, hopGPTRequest, transformer, res, req, sessionId) {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -161,12 +161,26 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, s
   res.flushHeaders();
   log.debug('Starting streaming response', { sessionId: sessionId.slice(0, 8) + '...' });
 
+  // Create abort controller for canceling upstream request on client disconnect
+  const abortController = new AbortController();
+  let clientDisconnected = false;
+
+  // Listen for client disconnect to abort upstream request
+  const onClose = () => {
+    if (!res.writableEnded) {
+      clientDisconnected = true;
+      log.debug('Client disconnected, aborting stream', { sessionId: sessionId.slice(0, 8) + '...' });
+      abortController.abort();
+    }
+  };
+  req.on('close', onClose);
+
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
 
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
-    });
+    }, abortController.signal);
 
     // Update conversation state BEFORE ending response to prevent race condition
     // where Claude Code makes another request before state is updated
@@ -175,8 +189,17 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, s
       updateConversationState(sessionId, nextState);
     }
 
-    res.end();
+    // Only end response if client is still connected
+    if (!clientDisconnected && !res.writableEnded) {
+      res.end();
+    }
   } catch (error) {
+    // Don't send error if client already disconnected
+    if (clientDisconnected || res.writableEnded || res.destroyed) {
+      log.debug('Suppressing error for disconnected client', { error: error.message });
+      return;
+    }
+
     // Send error as SSE event
     const errorEvent = {
       event: 'error',
@@ -190,6 +213,9 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, s
     };
     res.write(formatSSEEvent(errorEvent));
     res.end();
+  } finally {
+    // Clean up the close listener to prevent memory leaks
+    req.removeListener('close', onClose);
   }
 }
 
