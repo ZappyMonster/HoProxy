@@ -38,6 +38,20 @@ function normalizeModelName(value) {
   return value.trim().toLowerCase().replace(/_/g, '-');
 }
 
+function stripProviderPrefix(modelName) {
+  if (typeof modelName !== 'string') {
+    return modelName;
+  }
+
+  const trimmed = modelName.trim();
+  if (!trimmed.includes('/')) {
+    return trimmed;
+  }
+
+  const parts = trimmed.split('/').filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : trimmed;
+}
+
 function addModelVariants(variants, name) {
   if (!name) return;
   variants.add(name);
@@ -89,7 +103,8 @@ export function resolveModelMapping(modelName) {
     };
   }
 
-  const candidates = buildCandidateSet(modelName);
+  const strippedModel = stripProviderPrefix(modelName);
+  const candidates = buildCandidateSet(strippedModel);
   for (const candidate of candidates) {
     const mapping = MODEL_ALIAS_MAP.get(candidate);
     if (mapping) {
@@ -108,10 +123,10 @@ export function resolveModelMapping(modelName) {
 
   log.debug('Model not mapped, using as-is', { model: modelName });
   return {
-    hopgptModel: modelName,
-    responseModel: modelName,
+    hopgptModel: strippedModel,
+    responseModel: strippedModel,
     mapped: false
   };
 }
 
-export { MODEL_MAPPINGS };
+export { MODEL_MAPPINGS, stripProviderPrefix };
