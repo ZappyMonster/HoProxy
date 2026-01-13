@@ -1183,6 +1183,9 @@ export class HopGPTToAnthropicTransformer {
   _createMessageStop() {
     const events = [];
 
+    // Mark that we're emitting message_stop
+    this._hasEmittedMessageStop = true;
+
     // Flush any remaining buffered MCP tool calls
     if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
       const segments = splitMcpToolCalls(this.mcpToolCallBuffer);
@@ -1325,6 +1328,33 @@ export class HopGPTToAnthropicTransformer {
       lastAssistantMessageId: this.responseMessageId,
       systemPrompt: this.systemPrompt
     };
+  }
+
+  /**
+   * Check if the stream has been properly terminated with message_stop
+   * @returns {boolean} True if message_stop has been emitted
+   */
+  hasEnded() {
+    return this._hasEmittedMessageStop === true;
+  }
+
+  /**
+   * Force cleanup and emit message_stop if the stream ends without a final event
+   * This ensures clients always receive a proper termination signal
+   * @returns {Array} Array of cleanup SSE events to emit
+   */
+  forceEnd() {
+    // If we've already emitted message_stop, don't do it again
+    if (this._hasEmittedMessageStop) {
+      return [];
+    }
+
+    log.debug('Forcing stream end - no final event received from HopGPT');
+
+    // Use _createMessageStop to properly flush buffer, close blocks, and emit events
+    const events = this._createMessageStop();
+    this._hasEmittedMessageStop = true;
+    return events;
   }
 }
 
