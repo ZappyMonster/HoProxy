@@ -168,6 +168,9 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
   let clientDisconnected = false;
 
   // Listen for client disconnect to abort upstream request
+  // NOTE: Must use res.on('close'), NOT req.on('close')
+  // req 'close' fires when request body is fully read (immediately for POST)
+  // res 'close' fires when the response connection is actually closed
   const onClose = () => {
     if (!res.writableEnded) {
       clientDisconnected = true;
@@ -175,7 +178,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
       abortController.abort();
     }
   };
-  req.on('close', onClose);
+  res.on('close', onClose);
 
   try {
     const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
@@ -217,7 +220,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
     res.end();
   } finally {
     // Clean up the close listener to prevent memory leaks
-    req.removeListener('close', onClose);
+    res.removeListener('close', onClose);
   }
 }
 

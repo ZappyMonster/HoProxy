@@ -8,25 +8,29 @@ const router = Router();
 /**
  * Available models in HopGPT
  * Format compatible with Anthropic's model list API
+ *
+ * IMPORTANT: Model IDs should match what clients expect (standard Anthropic-style names).
+ * Clients like OpenCode validate model names and reject unknown IDs like "-thinking" variants.
+ * The proxy handles thinking mode internally based on model capabilities, not the model ID.
  */
 const CANONICAL_MODELS = [
   {
-    id: 'claude-opus-4-5-thinking',
+    id: 'claude-opus-4-5',
     type: 'model',
     created_at: '2025-01-01T00:00:00Z',
-    display_name: 'Claude Opus 4.5 (Thinking)',
+    display_name: 'Claude Opus 4.5',
   },
   {
-    id: 'claude-sonnet-4-5-thinking',
+    id: 'claude-sonnet-4-5',
     type: 'model',
     created_at: '2025-01-01T00:00:00Z',
-    display_name: 'Claude Sonnet 4.5 (Thinking)',
+    display_name: 'Claude Sonnet 4.5',
   },
   {
-    id: 'claude-haiku-4-5-thinking',
+    id: 'claude-haiku-4-5',
     type: 'model',
     created_at: '2025-01-01T00:00:00Z',
-    display_name: 'Claude Haiku 4.5 (Thinking)',
+    display_name: 'Claude Haiku 4.5',
   },
 ];
 
@@ -100,10 +104,10 @@ router.get('/models', (req, res) => {
 /**
  * GET /v1/models/:model_id
  * Returns a specific model by ID
- * Supports model IDs with provider prefix (e.g., anthropic/claude-opus-4-5-thinking)
+ * Supports model IDs with provider prefix (e.g., anthropic/claude-opus-4-5)
  */
 router.get('/models/*', (req, res) => {
-  // Handle model IDs that may contain slashes (e.g., anthropic/claude-opus-4-5-thinking)
+  // Handle model IDs that may contain slashes (e.g., anthropic/claude-opus-4-5)
   const rawId = req.params[0];
   const requestedId = stripProviderPrefix(rawId);
   let model = AVAILABLE_MODELS.find(m => m.id === requestedId);
