@@ -28,15 +28,173 @@ const INVOKE_BLOCK_RE = /<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>/gi;
 const INVOKE_START_TAG = '<invoke';
 const ANTML_INVOKE_START_TAG = '<antml:invoke';
 
-// Combined pattern for any tool call format
-// Includes antml: namespace variants used by Claude Code
-const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_call\b[\s\S]*?<\/tool_use>|<tool_use\b[\s\S]*?<\/tool_use>|<tool_use\b[\s\S]*?<\/tool_call>|<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>)/gi;
-
 const FUNCTION_CALLS_TAGS = [FUNCTION_CALLS_START_TAG, ANTML_FUNCTION_CALLS_START_TAG];
 const INVOKE_TAGS = [INVOKE_START_TAG, ANTML_INVOKE_START_TAG];
 
+const TOOL_TAG_NAMES = [
+  'mcp_tool_call',
+  'function_calls',
+  'antml:function_calls',
+  'tool_call',
+  'tool_use',
+  'invoke',
+  'antml:invoke'
+];
+
+const TOOL_TAG_NAME_SET = new Set(TOOL_TAG_NAMES);
+
+const TOOL_TAG_CLOSINGS = {
+  'mcp_tool_call': ['</mcp_tool_call>'],
+  'function_calls': ['</function_calls>', '</antml:function_calls>'],
+  'antml:function_calls': ['</antml:function_calls>', '</function_calls>'],
+  'invoke': ['</invoke>', '</antml:invoke>'],
+  'antml:invoke': ['</antml:invoke>', '</invoke>'],
+  'tool_call': ['</tool_call>', '</tool_use>'],
+  'tool_use': ['</tool_use>', '</tool_call>']
+};
+
 function includesAny(haystack, needles) {
   return needles.some(tag => haystack.includes(tag));
+}
+
+function isLikelyToolTagStart(text, index, tagName) {
+  if (index > 0) {
+    const prev = text[index - 1];
+    if (prev === '`' || prev === '"' || prev === "'" || prev === '/' || prev === '\\') {
+      return false;
+    }
+    if (/[A-Za-z0-9_]/.test(prev)) {
+      return false;
+    }
+  }
+
+  const afterTagIndex = index + 1 + tagName.length;
+  const after = text[afterTagIndex];
+  if (after === "'" || after === '"' || after === '`') {
+    return false;
+  }
+
+  return true;
+}
+
+function findNextToolTag(text, fromIndex) {
+  let index = text.indexOf('<', fromIndex);
+  while (index !== -1) {
+    if (text[index + 1] === '/') {
+      index = text.indexOf('<', index + 1);
+      continue;
+    }
+    const match = text.slice(index).match(/^<\s*([a-zA-Z0-9:]+)/);
+    if (!match) {
+      index = text.indexOf('<', index + 1);
+      continue;
+    }
+    const tagName = match[1].toLowerCase();
+    if (!TOOL_TAG_NAME_SET.has(tagName) || !isLikelyToolTagStart(text, index, tagName)) {
+      index = text.indexOf('<', index + 1);
+      continue;
+    }
+    const startTagEnd = text.indexOf('>', index + 1);
+    return { index, tagName, startTagEnd };
+  }
+  return null;
+}
+
+function findClosingTagMatch(text, fromIndex, tagName) {
+  const closingTags = TOOL_TAG_CLOSINGS[tagName] || [`</${tagName}>`];
+  const lower = text.toLowerCase();
+  let inString = false;
+  let escaped = false;
+  let inCdata = false;
+
+  for (let i = fromIndex; i < text.length; i++) {
+    if (inCdata) {
+      if (lower.startsWith(']]>', i)) {
+        inCdata = false;
+        i += 2;
+      }
+      continue;
+    }
+
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (lower.startsWith('<![cdata[', i)) {
+      inCdata = true;
+      i += 8;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === '<' && lower[i + 1] === '/') {
+      for (const closingTag of closingTags) {
+        if (lower.startsWith(closingTag, i)) {
+          return { startIndex: i, endIndex: i + closingTag.length };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractToolCallSegments(text) {
+  const segments = [];
+  if (!text) {
+    return { segments, lastIndex: 0 };
+  }
+
+  let index = 0;
+  while (index < text.length) {
+    const nextTag = findNextToolTag(text, index);
+    if (!nextTag) {
+      return { segments, lastIndex: index };
+    }
+
+    if (nextTag.index > index) {
+      segments.push({ type: 'text', text: text.slice(index, nextTag.index) });
+    }
+
+    if (nextTag.startTagEnd === -1) {
+      return { segments, lastIndex: nextTag.index };
+    }
+
+    const closingMatch = findClosingTagMatch(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    if (!closingMatch) {
+      return { segments, lastIndex: nextTag.index };
+    }
+
+    const block = text.slice(nextTag.index, closingMatch.endIndex);
+    const toolCalls = parseAnyToolCallBlock(block);
+    if (toolCalls.length === 0) {
+      segments.push({ type: 'text', text: block });
+    } else {
+      for (const toolCall of toolCalls) {
+        segments.push({ type: 'tool_call', toolCall });
+      }
+    }
+
+    index = closingMatch.endIndex;
+  }
+
+  return { segments, lastIndex: index };
 }
 
 function extractXmlTagValue(source, tagName) {
@@ -59,6 +217,26 @@ function extractXmlTagValueFlexible(source, tagName, fallbackTagName) {
   const matcher = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${fallbackTagName}>`, 'i');
   const match = source.match(matcher);
   return match ? match[1].trim() : null;
+}
+
+function extractXmlTagValueSafe(source, tagName) {
+  if (!source) {
+    return null;
+  }
+
+  const openerRe = new RegExp(`<${tagName}[^>]*>`, 'i');
+  const openMatch = source.match(openerRe);
+  if (!openMatch || openMatch.index === undefined) {
+    return null;
+  }
+
+  const startIndex = openMatch.index + openMatch[0].length;
+  const closingMatch = findClosingTagMatch(source, startIndex, tagName);
+  if (!closingMatch) {
+    return null;
+  }
+
+  return source.slice(startIndex, closingMatch.startIndex).trim();
 }
 
 function extractXmlAttribute(source, tagName, attrName) {
@@ -474,7 +652,7 @@ function parseFunctionCallsBlock(block) {
  * Format: <tool_call>{"name": "ToolName", "parameters": {...}}</tool_call>
  */
 function parseToolCallJsonBlock(block) {
-  const jsonContent = extractXmlTagValueFlexible(block, 'tool_call', 'tool_use');
+  const jsonContent = extractXmlTagValueSafe(block, 'tool_call');
   if (!jsonContent) {
     return null;
   }
@@ -503,7 +681,7 @@ function parseToolUseBlock(block) {
   const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
   const toolName = extractXmlAttribute(block, 'tool_use', 'name');
   if (!toolName) {
-    const inputText = extractXmlTagValueFlexible(block, 'tool_use', 'tool_call');
+    const inputText = extractXmlTagValueSafe(block, 'tool_use');
     if (!inputText) {
       return null;
     }
@@ -519,7 +697,7 @@ function parseToolUseBlock(block) {
     };
   }
 
-  const inputText = stripCdata(extractXmlTagValueFlexible(block, 'tool_use', 'tool_call'));
+  const inputText = stripCdata(extractXmlTagValueSafe(block, 'tool_use'));
   let parsedArgs = {};
 
   if (inputText && inputText.length > 0) {
@@ -588,139 +766,48 @@ function splitMcpToolCalls(text) {
     return [];
   }
 
-  const segments = [];
-  let lastIndex = 0;
-
-  // Use combined pattern to match both formats
-  ANY_TOOL_CALL_BLOCK_RE.lastIndex = 0;
-  let match = null;
-  while ((match = ANY_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
-    }
-    const toolCalls = parseAnyToolCallBlock(match[0]);
-    if (toolCalls.length === 0) {
-      // Fallback: emit the original text if parsing failed
-      segments.push({ type: 'text', text: match[0] });
-    } else {
-      for (const toolCall of toolCalls) {
-        segments.push({ type: 'tool_call', toolCall });
-      }
-    }
-    lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
-  }
-
+  const { segments, lastIndex } = extractToolCallSegments(text);
   if (lastIndex < text.length) {
     segments.push({ type: 'text', text: text.slice(lastIndex) });
   }
-
   return segments;
 }
 
 function splitStreamTextForMcpToolCalls(text) {
   const segments = [];
-  let lastIndex = 0;
 
   // Maximum buffer size before we give up waiting for a closing tag
   // This prevents infinite buffering when text contains partial tag-like content
   const MAX_BUFFER_SIZE = 8000;
 
-  // Use combined pattern to match both formats
-  ANY_TOOL_CALL_BLOCK_RE.lastIndex = 0;
-  let match = null;
-  while ((match = ANY_TOOL_CALL_BLOCK_RE.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ type: 'text', text: text.slice(lastIndex, match.index) });
-    }
-    const toolCalls = parseAnyToolCallBlock(match[0]);
-    if (toolCalls.length === 0) {
-      // Fallback: emit the original text if parsing failed
-      segments.push({ type: 'text', text: match[0] });
-    } else {
-      for (const toolCall of toolCalls) {
-        segments.push({ type: 'tool_call', toolCall });
-      }
-    }
-    lastIndex = ANY_TOOL_CALL_BLOCK_RE.lastIndex;
-  }
+  const { segments: parsedSegments, lastIndex } = extractToolCallSegments(text);
+  segments.push(...parsedSegments);
 
   const trailing = text.slice(lastIndex);
   if (!trailing) {
     return { segments, remainder: '' };
   }
 
-  // Check for partial <mcp_tool_call>, <function_calls>, or <tool_call> tags
-  // Also check for antml: namespace variants
-  const mcpStartIndex = trailing.indexOf(MCP_TOOL_CALL_START_TAG);
-  const funcStartIndex = trailing.indexOf(FUNCTION_CALLS_START_TAG);
-  const antmlFuncStartIndex = trailing.indexOf(ANTML_FUNCTION_CALLS_START_TAG);
-  const toolCallStartIndex = trailing.indexOf(TOOL_CALL_JSON_START_TAG);
-  const toolUseStartIndex = trailing.indexOf(TOOL_USE_START_TAG);
-  const invokeStartIndex = trailing.indexOf(INVOKE_START_TAG);
-  const antmlInvokeStartIndex = trailing.indexOf(ANTML_INVOKE_START_TAG);
-
-  // Find the earliest partial tag
-  let startIndex = -1;
-  const indices = [mcpStartIndex, funcStartIndex, antmlFuncStartIndex, toolCallStartIndex, toolUseStartIndex, invokeStartIndex, antmlInvokeStartIndex]
-    .filter(i => i !== -1);
-  if (indices.length > 0) {
-    startIndex = Math.min(...indices);
-  }
-
-  if (startIndex !== -1) {
-    // Check if the potential partial tag is actually inside quotes or backticks
-    // This helps avoid buffering documentation text like `<tool_use>` or "<invoke>"
-    const beforeTag = trailing.slice(Math.max(0, startIndex - 1), startIndex);
-    const isQuotedBefore = beforeTag === '`' || beforeTag === '"' || beforeTag === "'";
-
-    // Also check what comes after the tag start - if it's a quote, it's likely
-    // a string literal in source code (e.g., const TAG = '<function_calls';)
-    // Find the end of the tag name to check the next character
-    const tagNames = [
-      MCP_TOOL_CALL_START_TAG,
-      FUNCTION_CALLS_START_TAG,
-      ANTML_FUNCTION_CALLS_START_TAG,
-      TOOL_CALL_JSON_START_TAG,
-      TOOL_USE_START_TAG,
-      INVOKE_START_TAG,
-      ANTML_INVOKE_START_TAG
-    ];
-    let matchedTag = null;
-    for (const tag of tagNames) {
-      if (trailing.slice(startIndex).startsWith(tag)) {
-        matchedTag = tag;
-        break;
-      }
-    }
-    const afterTagIndex = matchedTag ? startIndex + matchedTag.length : startIndex + 1;
-    const afterTag = trailing.slice(afterTagIndex, afterTagIndex + 1);
-    const isQuotedAfter = afterTag === "'" || afterTag === '"';
-
-    // Also check if buffer would be too large - if so, it's probably not a real tool call
+  const nextTag = findNextToolTag(trailing, 0);
+  if (nextTag) {
+    const startIndex = nextTag.index;
     const potentialRemainder = trailing.slice(startIndex);
-    if (isQuotedBefore || isQuotedAfter || potentialRemainder.length > MAX_BUFFER_SIZE) {
-      // Don't buffer - emit as text instead
+    if (potentialRemainder.length > MAX_BUFFER_SIZE) {
       segments.push({ type: 'text', text: trailing });
       return { segments, remainder: '' };
     }
-
     if (startIndex > 0) {
       segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
     }
-    return { segments, remainder: trailing.slice(startIndex) };
+    return { segments, remainder: potentialRemainder };
   }
 
   // Check for partial tag at end (e.g., "<mcp_tool" or "<function" or "<tool_c" or "<")
   const lastLt = trailing.lastIndexOf('<');
   if (lastLt !== -1) {
     const possibleTag = trailing.slice(lastLt);
-    if (MCP_TOOL_CALL_START_TAG.startsWith(possibleTag) ||
-        FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
-        ANTML_FUNCTION_CALLS_START_TAG.startsWith(possibleTag) ||
-        TOOL_CALL_JSON_START_TAG.startsWith(possibleTag) ||
-        TOOL_USE_START_TAG.startsWith(possibleTag) ||
-        INVOKE_START_TAG.startsWith(possibleTag) ||
-        ANTML_INVOKE_START_TAG.startsWith(possibleTag)) {
+    const matchingTag = TOOL_TAG_NAMES.find(tag => `<${tag}`.startsWith(possibleTag));
+    if (matchingTag && isLikelyToolTagStart(trailing, lastLt, matchingTag)) {
       if (lastLt > 0) {
         segments.push({ type: 'text', text: trailing.slice(0, lastLt) });
       }
