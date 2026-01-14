@@ -155,6 +155,27 @@ function findClosingTagMatch(text, fromIndex, tagName) {
   return null;
 }
 
+function findClosingTagMatchLoose(text, fromIndex, tagName) {
+  const closingTags = TOOL_TAG_CLOSINGS[tagName] || [`</${tagName}>`];
+  const lower = text.toLowerCase();
+  let bestIndex = -1;
+  let bestTag = null;
+
+  for (const tag of closingTags) {
+    const index = lower.indexOf(tag, fromIndex);
+    if (index !== -1 && (bestIndex === -1 || index < bestIndex)) {
+      bestIndex = index;
+      bestTag = tag;
+    }
+  }
+
+  if (bestIndex === -1 || !bestTag) {
+    return null;
+  }
+
+  return { startIndex: bestIndex, endIndex: bestIndex + bestTag.length };
+}
+
 function extractToolCallSegments(text) {
   const segments = [];
   if (!text) {
@@ -176,7 +197,10 @@ function extractToolCallSegments(text) {
       return { segments, lastIndex: nextTag.index };
     }
 
-    const closingMatch = findClosingTagMatch(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    let closingMatch = findClosingTagMatch(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatchLoose(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    }
     if (!closingMatch) {
       return { segments, lastIndex: nextTag.index };
     }
@@ -1166,7 +1190,7 @@ export class HopGPTToAnthropicTransformer {
           try {
             input = JSON.parse(input);
           } catch (e) {
-            input = {};
+            input = { _raw: input };
           }
         }
 
@@ -1594,7 +1618,7 @@ export class HopGPTToAnthropicTransformer {
           try {
             input = JSON.parse(toolUse.inputJson);
           } catch (e) {
-            // If parsing fails, keep empty object
+            input = { _raw: toolUse.inputJson };
           }
         }
         content.push({
