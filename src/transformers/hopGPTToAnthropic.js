@@ -30,7 +30,7 @@ const ANTML_INVOKE_START_TAG = '<antml:invoke';
 
 // Combined pattern for any tool call format
 // Includes antml: namespace variants used by Claude Code
-const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_use\b[\s\S]*?<\/tool_use>|<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>)/gi;
+const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_call\b[\s\S]*?<\/tool_use>|<tool_use\b[\s\S]*?<\/tool_use>|<tool_use\b[\s\S]*?<\/tool_call>|<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>)/gi;
 
 const FUNCTION_CALLS_TAGS = [FUNCTION_CALLS_START_TAG, ANTML_FUNCTION_CALLS_START_TAG];
 const INVOKE_TAGS = [INVOKE_START_TAG, ANTML_INVOKE_START_TAG];
@@ -44,6 +44,19 @@ function extractXmlTagValue(source, tagName) {
     return null;
   }
   const matcher = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
+  const match = source.match(matcher);
+  return match ? match[1].trim() : null;
+}
+
+function extractXmlTagValueFlexible(source, tagName, fallbackTagName) {
+  const value = extractXmlTagValue(source, tagName);
+  if (value !== null) {
+    return value;
+  }
+  if (!source || !fallbackTagName) {
+    return null;
+  }
+  const matcher = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${fallbackTagName}>`, 'i');
   const match = source.match(matcher);
   return match ? match[1].trim() : null;
 }
@@ -84,6 +97,51 @@ function parseEmbeddedJson(value) {
     }
   }
   return value;
+}
+
+function parseJsonWithRepair(jsonText) {
+  if (!jsonText || typeof jsonText !== 'string') {
+    return null;
+  }
+  const cleaned = stripCdata(jsonText).trim();
+  if (!cleaned) {
+    return null;
+  }
+  try {
+    return JSON.parse(cleaned);
+  } catch (error) {
+    try {
+      const repaired = repairMalformedArrayJson(cleaned);
+      return JSON.parse(repaired);
+    } catch (repairError) {
+      return null;
+    }
+  }
+}
+
+function parseToolCallJsonContent(jsonContent) {
+  const parsed = parseJsonWithRepair(jsonContent);
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+  const toolName = parsed.name;
+  if (!toolName) {
+    return null;
+  }
+  const args = parsed.parameters || parsed.arguments || parsed.input || {};
+  return {
+    toolName,
+    arguments: parseEmbeddedJson(args),
+    toolUseId: parsed.id || parsed.toolUseId || null
+  };
+}
+
+function getLeadingTagName(block) {
+  if (!block) {
+    return null;
+  }
+  const match = block.trim().match(/^<\s*([a-zA-Z0-9:]+)/);
+  return match ? match[1].toLowerCase() : null;
 }
 
 /**
@@ -282,33 +340,21 @@ function parseFunctionCallsBlock(block) {
  * Format: <tool_call>{"name": "ToolName", "parameters": {...}}</tool_call>
  */
 function parseToolCallJsonBlock(block) {
-  const jsonContent = extractXmlTagValue(block, 'tool_call');
+  const jsonContent = extractXmlTagValueFlexible(block, 'tool_call', 'tool_use');
   if (!jsonContent) {
     return null;
   }
 
   try {
-    const cleanedContent = stripCdata(jsonContent).trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(cleanedContent);
-    } catch (parseError) {
-      // Try to repair malformed JSON (e.g., missing array brackets)
-      const repaired = repairMalformedArrayJson(cleanedContent);
-      parsed = JSON.parse(repaired);
-    }
-    const toolName = parsed.name;
-    const args = parsed.parameters || parsed.arguments || parsed.input || {};
-    const normalizedArgs = parseEmbeddedJson(args);
-
-    if (!toolName) {
+    const toolCall = parseToolCallJsonContent(jsonContent);
+    if (!toolCall) {
       return null;
     }
-
     return {
       serverName: null,
-      toolName,
-      arguments: normalizedArgs
+      toolName: toolCall.toolName,
+      toolUseId: toolCall.toolUseId,
+      arguments: toolCall.arguments
     };
   } catch (error) {
     log.warn('Failed to parse tool_call JSON', { error: error.message });
@@ -320,13 +366,26 @@ function parseToolCallJsonBlock(block) {
  * Format: <tool_use id="toolu_x" name="ToolName">{...}</tool_use>
  */
 function parseToolUseBlock(block) {
+  const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
   const toolName = extractXmlAttribute(block, 'tool_use', 'name');
   if (!toolName) {
-    return null;
+    const inputText = extractXmlTagValueFlexible(block, 'tool_use', 'tool_call');
+    if (!inputText) {
+      return null;
+    }
+    const toolCall = parseToolCallJsonContent(inputText);
+    if (!toolCall) {
+      return null;
+    }
+    return {
+      serverName: null,
+      toolName: toolCall.toolName,
+      toolUseId: toolUseId || toolCall.toolUseId,
+      arguments: toolCall.arguments
+    };
   }
 
-  const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
-  const inputText = stripCdata(extractXmlTagValue(block, 'tool_use'));
+  const inputText = stripCdata(extractXmlTagValueFlexible(block, 'tool_use', 'tool_call'));
   let parsedArgs = {};
 
   if (inputText && inputText.length > 0) {
@@ -357,6 +416,26 @@ function parseToolUseBlock(block) {
  * Parse any tool call block format and return array of tool calls
  */
 function parseAnyToolCallBlock(block) {
+  const leadingTag = getLeadingTagName(block);
+  if (leadingTag === 'mcp_tool_call') {
+    const toolCall = parseMcpToolCallBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
+  if (leadingTag === 'function_calls' || leadingTag === 'antml:function_calls') {
+    return parseFunctionCallsBlock(block);
+  }
+  if (leadingTag === 'invoke' || leadingTag === 'antml:invoke') {
+    const toolCall = parseInvokeBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
+  if (leadingTag === 'tool_call') {
+    const toolCall = parseToolCallJsonBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
+  if (leadingTag === 'tool_use') {
+    const toolCall = parseToolUseBlock(block);
+    return toolCall ? [toolCall] : [];
+  }
   const blockLower = block.toLowerCase();
   if (blockLower.includes(MCP_TOOL_CALL_START_TAG)) {
     const toolCall = parseMcpToolCallBlock(block);
