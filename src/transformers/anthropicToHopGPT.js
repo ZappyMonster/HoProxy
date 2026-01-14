@@ -38,8 +38,12 @@ function buildToolInjectionPrompt(tools, toolChoice) {
       for (const [paramName, paramDef] of Object.entries(properties)) {
         const reqMark = required.includes(paramName) ? ' (required)' : '';
         const paramType = describeSchemaType(paramDef);
-        const paramDesc = paramDef.description ? `: ${paramDef.description.slice(0, 100)}` : '';
+        const paramDesc = paramDef.description ? `: ${truncateSchemaDescription(paramDef.description)}` : '';
         prompt += `- ${paramName}${reqMark} [${paramType}]${paramDesc}\n`;
+        const detailLines = formatSchemaDetailLines(paramDef, 1);
+        for (const line of detailLines) {
+          prompt += `${line}\n`;
+        }
       }
       prompt += '\n';
     }
@@ -342,6 +346,49 @@ function describeSchemaType(schema) {
   }
 
   return "any";
+}
+
+const MAX_SCHEMA_DEPTH = 4;
+const MAX_SCHEMA_PROPERTIES = 12;
+
+function truncateSchemaDescription(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.length > 120 ? `${value.slice(0, 120)}...` : value;
+}
+
+function formatSchemaDetailLines(schema, depth = 0) {
+  if (!schema || typeof schema !== "object" || depth >= MAX_SCHEMA_DEPTH) {
+    return [];
+  }
+
+  const lines = [];
+  const indent = "  ".repeat(depth);
+
+  if (schema.items && typeof schema.items === "object") {
+    const itemType = describeSchemaType(schema.items);
+    const itemDesc = schema.items.description ? `: ${truncateSchemaDescription(schema.items.description)}` : "";
+    lines.push(`${indent}- items [${itemType}]${itemDesc}`);
+    lines.push(...formatSchemaDetailLines(schema.items, depth + 1));
+  }
+
+  if (schema.properties && typeof schema.properties === "object") {
+    const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+    const entries = Object.entries(schema.properties);
+    for (const [name, propSchema] of entries.slice(0, MAX_SCHEMA_PROPERTIES)) {
+      const reqMark = required.has(name) ? " (required)" : "";
+      const propType = describeSchemaType(propSchema);
+      const propDesc = propSchema.description ? `: ${truncateSchemaDescription(propSchema.description)}` : "";
+      lines.push(`${indent}- ${name}${reqMark} [${propType}]${propDesc}`);
+      lines.push(...formatSchemaDetailLines(propSchema, depth + 1));
+    }
+    if (entries.length > MAX_SCHEMA_PROPERTIES) {
+      lines.push(`${indent}- ... (${entries.length - MAX_SCHEMA_PROPERTIES} more)`);
+    }
+  }
+
+  return lines;
 }
 
 /**
