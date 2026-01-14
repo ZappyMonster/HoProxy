@@ -2,8 +2,17 @@ import { tlsFetch } from './tlsClient.js';
 import fs from 'fs';
 import path from 'path';
 import { loggers } from '../utils/logger.js';
+import {
+  TokenRefreshError,
+  RefreshTokenExpiredError,
+  CloudflareBlockedError,
+  NetworkError
+} from '../errors/authErrors.js';
 
 const log = loggers.hopgpt;
+
+// In-process mutex for .env file writes
+let envWritePromise = null;
 
 /**
  * HopGPT API Client
@@ -27,7 +36,6 @@ export class HopGPTClient {
     this.streamingTransport = (config.streamingTransport ||
       process.env.HOPGPT_STREAMING_TRANSPORT ||
       'fetch').toLowerCase();
-    this.isRefreshing = false;
     this.refreshPromise = null;  // Promise-based mutex for concurrent refresh
     // Proactive refresh buffer: refresh this many seconds before expiration
     // Increased from 60 to 300 (5 minutes) to handle network latency and concurrent requests
@@ -231,76 +239,91 @@ export class HopGPTClient {
   /**
    * Persist current credentials to .env file
    * Updates only the token-related variables, preserving other settings
+   * FIX P1 #4: Uses in-process mutex to prevent race conditions
    */
-  persistCredentials() {
+  async persistCredentials() {
     if (!this.autoPersist) {
       return;
     }
 
-    try {
-      let existingContent = '';
-      const preservedLines = [];
+    // FIX P1 #4: In-process mutex - wait for any pending write to complete
+    if (envWritePromise) {
+      await envWritePromise;
+    }
 
-      // Variables we will update
-      const tokenVars = new Set([
-        'HOPGPT_BEARER_TOKEN',
-        'HOPGPT_COOKIE_REFRESH_TOKEN'
-      ]);
+    // Create the write operation and store it in the mutex
+    const writeOperation = (async () => {
+      try {
+        let existingContent = '';
+        const preservedLines = [];
 
-      // Read existing .env if it exists
-      if (fs.existsSync(this.envPath)) {
-        existingContent = fs.readFileSync(this.envPath, 'utf-8');
+        // Variables we will update
+        const tokenVars = new Set([
+          'HOPGPT_BEARER_TOKEN',
+          'HOPGPT_COOKIE_REFRESH_TOKEN'
+        ]);
 
-        for (const line of existingContent.split('\n')) {
-          const trimmed = line.trim();
+        // Read existing .env if it exists
+        if (fs.existsSync(this.envPath)) {
+          existingContent = fs.readFileSync(this.envPath, 'utf-8');
 
-          // Check if this line sets a token variable we want to update
-          const isTokenVar = Array.from(tokenVars).some(v =>
-            trimmed.startsWith(`${v}=`) || trimmed.startsWith(`# ${v}=`)
-          );
+          for (const line of existingContent.split('\n')) {
+            const trimmed = line.trim();
 
-          if (!isTokenVar) {
-            preservedLines.push(line);
+            // Check if this line sets a token variable we want to update
+            const isTokenVar = Array.from(tokenVars).some(v =>
+              trimmed.startsWith(`${v}=`) || trimmed.startsWith(`# ${v}=`)
+            );
+
+            if (!isTokenVar) {
+              preservedLines.push(line);
+            }
           }
         }
-      }
 
-      // Build new token lines
-      const tokenLines = [];
-      if (this.bearerToken) {
-        tokenLines.push(`HOPGPT_BEARER_TOKEN=${this.bearerToken}`);
-      }
-      if (this.cookies.refreshToken) {
-        tokenLines.push(`HOPGPT_COOKIE_REFRESH_TOKEN=${this.cookies.refreshToken}`);
-      }
-
-      // Find where to insert token lines (after header comments, before other content)
-      let insertIndex = 0;
-      for (let i = 0; i < preservedLines.length; i++) {
-        const line = preservedLines[i].trim();
-        if (line.startsWith('#') || line === '') {
-          insertIndex = i + 1;
-        } else {
-          break;
+        // Build new token lines
+        const tokenLines = [];
+        if (this.bearerToken) {
+          tokenLines.push(`HOPGPT_BEARER_TOKEN=${this.bearerToken}`);
         }
+        if (this.cookies.refreshToken) {
+          tokenLines.push(`HOPGPT_COOKIE_REFRESH_TOKEN=${this.cookies.refreshToken}`);
+        }
+
+        // Find where to insert token lines (after header comments, before other content)
+        let insertIndex = 0;
+        for (let i = 0; i < preservedLines.length; i++) {
+          const line = preservedLines[i].trim();
+          if (line.startsWith('#') || line === '') {
+            insertIndex = i + 1;
+          } else {
+            break;
+          }
+        }
+
+        // Insert token lines
+        preservedLines.splice(insertIndex, 0, ...tokenLines);
+
+        // Ensure file ends with newline
+        let finalContent = preservedLines.join('\n');
+        if (!finalContent.endsWith('\n')) {
+          finalContent += '\n';
+        }
+
+        // Write back to .env
+        fs.writeFileSync(this.envPath, finalContent);
+
+        log.debug('Credentials persisted to .env');
+      } catch (error) {
+        log.error('Failed to persist credentials', { error: error.message });
+      } finally {
+        // Clear the mutex when done
+        envWritePromise = null;
       }
+    })();
 
-      // Insert token lines
-      preservedLines.splice(insertIndex, 0, ...tokenLines);
-
-      // Ensure file ends with newline
-      let finalContent = preservedLines.join('\n');
-      if (!finalContent.endsWith('\n')) {
-        finalContent += '\n';
-      }
-
-      // Write back to .env
-      fs.writeFileSync(this.envPath, finalContent);
-
-      log.debug('Credentials persisted to .env');
-    } catch (error) {
-      log.error('Failed to persist credentials', { error: error.message });
-    }
+    envWritePromise = writeOperation;
+    return writeOperation;
   }
 
   /**
@@ -358,10 +381,13 @@ export class HopGPTClient {
   /**
    * Refresh the bearer token using the refresh token
    * @returns {Promise<boolean>} True if refresh succeeded
+   * @throws {RefreshTokenExpiredError} When refresh token has expired
+   * @throws {CloudflareBlockedError} When blocked by Cloudflare
+   * @throws {NetworkError} When network error occurs
    */
   async refreshTokens() {
-    // Use promise-based mutex to handle concurrent refresh requests
-    // All concurrent callers will await the same refresh operation
+    // FIX P0 #1: Race condition fix - check for existing promise first
+    // If a refresh is already in progress, all concurrent callers await the same promise
     if (this.refreshPromise) {
       log.info('Waiting for ongoing token refresh');
       return this.refreshPromise;
@@ -372,14 +398,20 @@ export class HopGPTClient {
       return false;
     }
 
-    // Create and store the refresh promise so concurrent requests can await it
-    this.refreshPromise = this._doRefreshTokens();
-    
-    try {
-      return await this.refreshPromise;
-    } finally {
-      this.refreshPromise = null;
-    }
+    // FIX P0 #1: Synchronously create and assign the promise BEFORE any await
+    // This eliminates the TOCTOU race window - the promise is set immediately
+    // and any concurrent calls will see it and await it
+    const refreshOperation = (async () => {
+      try {
+        return await this._doRefreshTokens();
+      } finally {
+        // Clear the promise only after the operation completes
+        this.refreshPromise = null;
+      }
+    })();
+
+    this.refreshPromise = refreshOperation;
+    return refreshOperation;
   }
 
   /**
@@ -388,8 +420,7 @@ export class HopGPTClient {
    * @private
    */
   async _doRefreshTokens() {
-    this.isRefreshing = true;
-      const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
+    const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
       log.info('Attempting token refresh', {
         refreshTokenExpiry: refreshTokenInfo ? `${refreshTokenInfo.expiresInSeconds}s` : 'invalid'
       });
@@ -427,22 +458,33 @@ export class HopGPTClient {
         browserType
       });
 
+      // FIX P1 #5: Error classification for different failure types
       if (!response.ok) {
-        const errorText = response.body;
+        const errorText = response.body || '';
         log.error('Token refresh failed', { status: response.status, statusText: response.statusText });
         log.debug('Refresh error response body', { body: errorText });
+        
+        // Classify the error based on status code and response
+        if (response.status === 401 || response.status === 403) {
+          throw new RefreshTokenExpiredError();
+        } else if (response.status === 503 || errorText.includes('cf-') || errorText.includes('cloudflare')) {
+          throw new CloudflareBlockedError();
+        }
+        // Generic failure - return false for backwards compatibility
         return false;
       }
 
       // Parse the response to get the new bearer token
       const data = await response.json();
 
+      // FIX P0 #2: Return false when token is missing instead of falling through to return true
       if (data.token) {
         this.bearerToken = data.token;
         const newTokenInfo = this._getTokenExpiryInfo(data.token);
         log.info('Bearer token refreshed', { expiresIn: newTokenInfo ? `${newTokenInfo.expiresInSeconds}s` : 'unknown' });
       } else {
         log.error('Refresh response did not contain token');
+        return false;  // FIX: Explicit failure when no token received
       }
 
       // Update cookies from Set-Cookie headers (includes rotated refresh token)
@@ -468,14 +510,18 @@ export class HopGPTClient {
       }
 
       // Persist new credentials to .env so they survive server restarts
-      this.persistCredentials();
+      await this.persistCredentials();
 
       return true;
     } catch (error) {
+      // FIX P1 #5: Re-throw classified errors, wrap others as NetworkError
+      if (error instanceof RefreshTokenExpiredError || 
+          error instanceof CloudflareBlockedError ||
+          error instanceof NetworkError) {
+        throw error;
+      }
       log.error('Token refresh error', { error: error.message });
-      return false;
-    } finally {
-      this.isRefreshing = false;
+      throw new NetworkError(error);
     }
   }
 
@@ -553,13 +599,17 @@ export class HopGPTClient {
     requestOptions = {},
     retryState = { isAuthRetry: false, rateLimitAttempt: 0 }
   ) {
+    // FIX P0 #3: Check return value of proactive token refresh
     // Proactively refresh token if needed (before making the request)
     if (!retryState.isAuthRetry) {
       const tokenInfo = this._getTokenExpiryInfo(this.bearerToken);
       if (tokenInfo && tokenInfo.expiresInSeconds <= this.proactiveRefreshBufferSec + 60) {
         log.debug('Token nearing expiry', { expiresIn: `${tokenInfo.expiresInSeconds}s`, buffer: `${this.proactiveRefreshBufferSec}s` });
       }
-      await this.ensureValidToken();
+      const tokenValid = await this.ensureValidToken();
+      if (!tokenValid) {
+        throw new TokenRefreshError('Failed to obtain valid authentication token before request');
+      }
     }
 
     const url = `${this.baseURL}${this.endpoint}`;
