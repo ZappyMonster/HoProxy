@@ -1,5 +1,12 @@
 import { Router } from 'express';
 import { getDefaultClient, getTokenExpiryInfo } from '../services/hopgptClient.js';
+import {
+  AuthError,
+  RefreshTokenExpiredError,
+  TokenRefreshError,
+  CloudflareBlockedError,
+  NetworkError
+} from '../errors/authErrors.js';
 import { loggers } from '../utils/logger.js';
 
 const log = loggers.auth;
@@ -58,21 +65,57 @@ router.post('/refresh-token', async (req, res) => {
     });
   }
 
-  const refreshed = await client.refreshTokens();
-  const tokenExpiry = refreshed ? getTokenExpiryInfo(client.bearerToken) : null;
+  try {
+    const refreshed = await client.refreshTokens();
+    const tokenExpiry = refreshed ? getTokenExpiryInfo(client.bearerToken) : null;
 
-  if (refreshed) {
-    log.info('Token refresh successful', {
-      expiresIn: tokenExpiry?.expiresInSeconds ? `${Math.floor(tokenExpiry.expiresInSeconds / 60)}m` : 'unknown'
+    if (refreshed) {
+      log.info('Token refresh successful', {
+        expiresIn: tokenExpiry?.expiresInSeconds ? `${Math.floor(tokenExpiry.expiresInSeconds / 60)}m` : 'unknown'
+      });
+    } else {
+      log.error('Token refresh failed');
+    }
+
+    return res.status(refreshed ? 200 : 502).json({
+      success: refreshed,
+      tokenExpiry: tokenExpiry || undefined
     });
-  } else {
-    log.error('Token refresh failed');
-  }
+  } catch (error) {
+    if (error instanceof AuthError) {
+      const { statusCode, errorType } = mapAuthErrorStatus(error);
+      log.warn('Token refresh failed', { error: error.message, type: error.constructor.name });
+      return res.status(statusCode).json({
+        success: false,
+        error: {
+          type: errorType,
+          message: error.message
+        }
+      });
+    }
 
-  return res.status(refreshed ? 200 : 502).json({
-    success: refreshed,
-    tokenExpiry: tokenExpiry || undefined
-  });
+    log.error('Token refresh error', { error: error.message });
+    return res.status(502).json({
+      success: false,
+      error: {
+        type: 'api_error',
+        message: error.message || 'Token refresh failed'
+      }
+    });
+  }
 });
 
 export default router;
+
+function mapAuthErrorStatus(error) {
+  if (error instanceof RefreshTokenExpiredError || error instanceof TokenRefreshError) {
+    return { statusCode: 401, errorType: 'authentication_error' };
+  }
+  if (error instanceof CloudflareBlockedError) {
+    return { statusCode: 503, errorType: 'api_error' };
+  }
+  if (error instanceof NetworkError) {
+    return { statusCode: 502, errorType: 'api_error' };
+  }
+  return { statusCode: 500, errorType: 'api_error' };
+}

@@ -3,6 +3,13 @@ import { transformAnthropicToHopGPT, extractThinkingConfig, normalizeSystemPromp
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
 import {
+  AuthError,
+  RefreshTokenExpiredError,
+  TokenRefreshError,
+  CloudflareBlockedError,
+  NetworkError
+} from '../errors/authErrors.js';
+import {
   resolveSessionId,
   shouldResetConversation,
   getConversationState,
@@ -190,7 +197,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
   res.on('close', onClose);
 
   try {
-    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
+    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true, signal: abortController.signal });
 
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
@@ -340,6 +347,14 @@ function mergeConversationStates(storedState, requestState) {
 function handleError(error, res) {
   log.error('Request failed', { error: error.message, type: error.constructor.name });
 
+  if (error instanceof AuthError) {
+    const resolved = mapAuthErrorResponse(error);
+    if (resolved.retryAfterSeconds) {
+      res.setHeader('Retry-After', resolved.retryAfterSeconds);
+    }
+    return res.status(resolved.statusCode).json(resolved.payload);
+  }
+
   if (error instanceof HopGPTError) {
     const statusCode = error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 502;
     const responseBody = typeof error.responseBody === 'string' ? error.responseBody : '';
@@ -398,6 +413,30 @@ function mapErrorResponse({ statusCode, message, responseBody, fallbackType, ret
   const resolvedStatus = statusCode >= 400 && statusCode < 600 ? statusCode : 502;
   const resolvedType = fallbackType || (resolvedStatus >= 500 ? 'api_error' : 'invalid_request_error');
   return buildErrorResponse(resolvedStatus, resolvedType, errorText, retryAfterSeconds);
+}
+
+function mapAuthErrorResponse(error) {
+  let statusCode = 500;
+  let errorType = 'api_error';
+
+  if (error instanceof RefreshTokenExpiredError || error instanceof TokenRefreshError) {
+    statusCode = 401;
+    errorType = 'authentication_error';
+  } else if (error instanceof CloudflareBlockedError) {
+    statusCode = 503;
+    errorType = 'api_error';
+  } else if (error instanceof NetworkError) {
+    statusCode = 502;
+    errorType = 'api_error';
+  }
+
+  return mapErrorResponse({
+    statusCode,
+    message: error.message,
+    responseBody: '',
+    fallbackType: errorType,
+    retryAfterMs: null
+  });
 }
 
 function buildErrorResponse(statusCode, errorType, message, retryAfterSeconds) {
