@@ -623,9 +623,13 @@ export function transformAnthropicToHopGPT(
   });
   
   const imageDetail = "high";
-  // Stop sequence must match the format we tell the model to use in buildToolInjectionPrompt
-  // The model is instructed to use <tool_call>...</tool_call> format
-  const toolCallStopSequence = "</tool_call>";
+  // NOTE: Do NOT use </tool_call> as stop sequence - it causes the model to stop after
+  // each individual tool call, forcing Claude Code to make many requests in a loop.
+  // Using a non-matching stop sequence (or none) allows the model to batch multiple
+  // tool calls in a single response, which is more efficient.
+  // The </mcp_tool_call> sequence doesn't match the <tool_call> format we instruct,
+  // so it effectively allows multi-tool responses.
+  const toolCallStopSequence = "</mcp_tool_call>";
   const normalizedTools = normalizeToolDefinitions(tools);
 
   // Get thinking configuration
