@@ -120,7 +120,7 @@ describe('anthropicToHopGPT transformers', () => {
     expect(systemPrompt).toBe('Line 1\nLine 2');
   });
 
-  it('always appends mcp tool call stop sequence', () => {
+  it('always appends tool_call stop sequence', () => {
     const request = {
       model: 'claude-sonnet-4-5-thinking',
       messages: [{ role: 'user', content: 'Hello' }]
@@ -128,10 +128,11 @@ describe('anthropicToHopGPT transformers', () => {
 
     const result = transformAnthropicToHopGPT(request);
 
-    expect(result.stop_sequences).toEqual(['</mcp_tool_call>']);
+    // The stop sequence matches the format instructed in buildToolInjectionPrompt
+    expect(result.stop_sequences).toEqual(['</tool_call>']);
   });
 
-  it('treats stop as an alias for stop_sequences and appends mcp stop', () => {
+  it('treats stop as an alias for stop_sequences and appends tool_call stop', () => {
     const request = {
       model: 'claude-sonnet-4-5-thinking',
       messages: [{ role: 'user', content: 'Hello' }],
@@ -140,6 +141,6 @@ describe('anthropicToHopGPT transformers', () => {
 
     const result = transformAnthropicToHopGPT(request);
 
-    expect(result.stop_sequences).toEqual(['<end>', '</mcp_tool_call>']);
+    expect(result.stop_sequences).toEqual(['<end>', '</tool_call>']);
   });
 });
