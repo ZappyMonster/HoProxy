@@ -650,6 +650,80 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(response.stop_reason).toBe('tool_use');
   });
 
+  it('parses tool_use JSON containing tag-like strings and continues parsing tool calls', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const oldString = [
+      'const TOOL_CALL_JSON_BLOCK_RE = /<tool_call\\b[\\s\\S]*?<\\/tool_call>/gi;',
+      "const TOOL_USE_TAG = '</tool_use>';"
+    ].join('\n');
+    const toolUsePayload = {
+      filePath: '/tmp/example.js',
+      oldString,
+      newString: 'updated'
+    };
+    const toolUse = `<tool_use id="toolu_edit" name="edit">
+${JSON.stringify(toolUsePayload, null, 2)}
+</tool_use>`;
+    const followupToolCall = `<tool_call>{"name": "Read", "parameters": {"path": "README.md"}}</tool_call>`;
+
+    const splitPoint = Math.max(1, toolUse.indexOf('</tool_use>') - 10);
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: toolUse.slice(0, splitPoint) }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `${toolUse.slice(splitPoint)}${followupToolCall}` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(2);
+    expect(toolUseBlocks[0].name).toBe('edit');
+    expect(toolUseBlocks[0].input.filePath).toBe('/tmp/example.js');
+    expect(toolUseBlocks[0].input.oldString).toContain('</tool_call>');
+    expect(toolUseBlocks[1].name).toBe('Read');
+    expect(toolUseBlocks[1].input).toEqual({ path: 'README.md' });
+  });
+
   it('extracts antml:function_calls/antml:invoke blocks from text (Claude Code format)', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false
