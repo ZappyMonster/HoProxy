@@ -84,7 +84,7 @@ function findNextToolTag(text, fromIndex) {
       index = text.indexOf('<', index + 1);
       continue;
     }
-    const match = text.slice(index).match(/^<\s*([a-zA-Z0-9:]+)/);
+    const match = text.slice(index).match(/^<\s*([a-zA-Z0-9:_-]+)/);
     if (!match) {
       index = text.indexOf('<', index + 1);
       continue;
@@ -378,7 +378,7 @@ function getLeadingTagName(block) {
   if (!block) {
     return null;
   }
-  const match = block.trim().match(/^<\s*([a-zA-Z0-9:]+)/);
+  const match = block.trim().match(/^<\s*([a-zA-Z0-9:_-]+)/);
   return match ? match[1].toLowerCase() : null;
 }
 
