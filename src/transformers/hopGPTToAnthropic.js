@@ -474,7 +474,15 @@ function splitStreamTextForMcpToolCalls(text) {
     // Also check what comes after the tag start - if it's a quote, it's likely
     // a string literal in source code (e.g., const TAG = '<function_calls';)
     // Find the end of the tag name to check the next character
-    const tagNames = ['<mcp_tool_call', '<function_calls', '<function_calls', '<tool_call', '<tool_use', '<invoke', '<invoke'];
+    const tagNames = [
+      MCP_TOOL_CALL_START_TAG,
+      FUNCTION_CALLS_START_TAG,
+      ANTML_FUNCTION_CALLS_START_TAG,
+      TOOL_CALL_JSON_START_TAG,
+      TOOL_USE_START_TAG,
+      INVOKE_START_TAG,
+      ANTML_INVOKE_START_TAG
+    ];
     let matchedTag = null;
     for (const tag of tagNames) {
       if (trailing.slice(startIndex).startsWith(tag)) {
