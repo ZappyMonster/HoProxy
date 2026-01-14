@@ -419,6 +419,10 @@ function splitStreamTextForMcpToolCalls(text) {
   const segments = [];
   let lastIndex = 0;
 
+  // Maximum buffer size before we give up waiting for a closing tag
+  // This prevents infinite buffering when text contains partial tag-like content
+  const MAX_BUFFER_SIZE = 8000;
+
   // Use combined pattern to match both formats
   ANY_TOOL_CALL_BLOCK_RE.lastIndex = 0;
   let match = null;
@@ -462,6 +466,19 @@ function splitStreamTextForMcpToolCalls(text) {
   }
 
   if (startIndex !== -1) {
+    // Check if the potential partial tag is actually inside quotes or backticks
+    // This helps avoid buffering documentation text like `<tool_use>` or "<invoke>"
+    const beforeTag = trailing.slice(Math.max(0, startIndex - 1), startIndex);
+    const isQuoted = beforeTag === '`' || beforeTag === '"' || beforeTag === "'";
+
+    // Also check if buffer would be too large - if so, it's probably not a real tool call
+    const potentialRemainder = trailing.slice(startIndex);
+    if (isQuoted || potentialRemainder.length > MAX_BUFFER_SIZE) {
+      // Don't buffer - emit as text instead
+      segments.push({ type: 'text', text: trailing });
+      return { segments, remainder: '' };
+    }
+
     if (startIndex > 0) {
       segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
     }
@@ -755,14 +772,17 @@ export class HopGPTToAnthropicTransformer {
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
 
-      // Debug: Log parsed segments
-      if (process.env.HOPGPT_DEBUG === 'true' && segments.length > 0) {
+      // Debug: Log buffer state when it grows large (potential infinite buffering issue)
+      if (process.env.HOPGPT_DEBUG === 'true') {
+        if (remainder && remainder.length > 500) {
+          console.log('[Transform] WARNING: Large buffer detected:', remainder.length, 'chars. First 200:', remainder.slice(0, 200));
+        }
         const toolCalls = segments.filter(s => s.type === 'tool_call');
         if (toolCalls.length > 0) {
           console.log(`[Transform] Parsed ${toolCalls.length} tool calls from text`);
-        }
-        if (remainder) {
-          console.log('[Transform] Buffered remainder:', remainder.slice(0, 100));
+          for (const tc of toolCalls) {
+            console.log('[Transform] Tool call:', tc.toolCall?.toolName);
+          }
         }
       }
 
