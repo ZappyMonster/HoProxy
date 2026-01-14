@@ -1340,4 +1340,78 @@ line3"}}
     );
     expect(toolBlocks.length).toBe(0);
   });
+
+  it('emits malformed tool_call JSON as text instead of buffering', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+
+    const chunk = '<tool_call>{"name": "Edit", "parameters": {"path": "foo.txt", "content": "uncaptured " quote"}}</tool_call>';
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [{ type: 'text', text: chunk }]
+        }
+      }
+    });
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+
+    expect(textDeltas).toContain('<tool_call>');
+    expect(textDeltas).toContain('uncaptured');
+
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(0);
+  });
+
+  it('preserves raw tool_use input when JSON parsing fails', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const invalidInput = '{"q": "bad " quote"}';
+    transformer.transformEvent({
+      event: 'message',
+      data: JSON.stringify({
+        final: true,
+        responseMessage: {
+          messageId: 'msg-final',
+          promptTokens: 0,
+          tokenCount: 0,
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_1',
+              name: 'search',
+              input: invalidInput
+            }
+          ]
+        }
+      })
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolBlock = response.content.find(block => block.type === 'tool_use');
+    expect(toolBlock.input).toEqual({ _raw: invalidInput });
+  });
 });

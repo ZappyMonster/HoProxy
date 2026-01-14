@@ -561,13 +561,14 @@ export class HopGPTClient {
     return sanitized;
   }
 
-  async _fetchStream(url, headers, body) {
+  async _fetchStream(url, headers, body, signal) {
     const sanitizedHeaders = this._sanitizeHeadersForFetch(headers);
 
     return fetch(url, {
       method: 'POST',
       headers: sanitizedHeaders,
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
   }
 
@@ -628,6 +629,7 @@ export class HopGPTClient {
     };
 
     const isStreaming = requestOptions.stream === true;
+    const abortSignal = requestOptions.signal;
     if (isStreaming) {
       headers['Accept'] = 'text/event-stream';
       headers['Cache-Control'] = 'no-cache';
@@ -650,7 +652,10 @@ export class HopGPTClient {
 
     if (useFetchForStreaming) {
       try {
-        response = await this._fetchStream(url, headers, hopGPTRequest);
+        if (abortSignal?.aborted) {
+          throw new Error('Request aborted');
+        }
+        response = await this._fetchStream(url, headers, hopGPTRequest, abortSignal);
       } catch (error) {
         useFetchForStreaming = false;
         log.debug('Streaming fetch failed, falling back to TLS client', { error: error.message });
@@ -658,6 +663,9 @@ export class HopGPTClient {
     }
 
     if (!useFetchForStreaming) {
+      if (abortSignal?.aborted) {
+        throw new Error('Request aborted');
+      }
       response = await tlsFetch({
         url,
         method: 'POST',
