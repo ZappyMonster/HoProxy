@@ -469,11 +469,26 @@ function splitStreamTextForMcpToolCalls(text) {
     // Check if the potential partial tag is actually inside quotes or backticks
     // This helps avoid buffering documentation text like `<tool_use>` or "<invoke>"
     const beforeTag = trailing.slice(Math.max(0, startIndex - 1), startIndex);
-    const isQuoted = beforeTag === '`' || beforeTag === '"' || beforeTag === "'";
+    const isQuotedBefore = beforeTag === '`' || beforeTag === '"' || beforeTag === "'";
+
+    // Also check what comes after the tag start - if it's a quote, it's likely
+    // a string literal in source code (e.g., const TAG = '<function_calls';)
+    // Find the end of the tag name to check the next character
+    const tagNames = ['<mcp_tool_call', '<function_calls', '<function_calls', '<tool_call', '<tool_use', '<invoke', '<invoke'];
+    let matchedTag = null;
+    for (const tag of tagNames) {
+      if (trailing.slice(startIndex).startsWith(tag)) {
+        matchedTag = tag;
+        break;
+      }
+    }
+    const afterTagIndex = matchedTag ? startIndex + matchedTag.length : startIndex + 1;
+    const afterTag = trailing.slice(afterTagIndex, afterTagIndex + 1);
+    const isQuotedAfter = afterTag === "'" || afterTag === '"';
 
     // Also check if buffer would be too large - if so, it's probably not a real tool call
     const potentialRemainder = trailing.slice(startIndex);
-    if (isQuoted || potentialRemainder.length > MAX_BUFFER_SIZE) {
+    if (isQuotedBefore || isQuotedAfter || potentialRemainder.length > MAX_BUFFER_SIZE) {
       // Don't buffer - emit as text instead
       segments.push({ type: 'text', text: trailing });
       return { segments, remainder: '' };

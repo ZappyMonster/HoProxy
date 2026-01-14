@@ -1079,4 +1079,77 @@ describe('hopGPTToAnthropic transformer', () => {
     );
     expect(toolBlocks.length).toBe(0);
   });
+
+  it('does not buffer source code containing tag-like string literals', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+
+    // Send source code that contains tag-like string literals
+    // The quote AFTER the tag name should prevent buffering
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: "const FUNCTION_CALLS_START_TAG = '<function_calls';\nconst INVOKE_START_TAG = '<invoke';\n" }
+          ]
+        }
+      }
+    });
+
+    // Send more text to verify it wasn't buffered
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'More code here.' }
+          ]
+        }
+      }
+    });
+
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // Source code with string literals should be emitted, not buffered
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+
+    // Both chunks should have been emitted
+    expect(textDeltas).toContain("'<function_calls'");
+    expect(textDeltas).toContain("'<invoke'");
+    expect(textDeltas).toContain('More code here');
+
+    // No tool_use blocks should be created
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(0);
+  });
 });
