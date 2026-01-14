@@ -1007,4 +1007,76 @@ describe('hopGPTToAnthropic transformer', () => {
     const messageStop = cleanupEvents.find(evt => evt.event === 'message_stop');
     expect(messageStop).toBeTruthy();
   });
+
+  it('does not buffer quoted tool tags in documentation text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+
+    // Send text that contains quoted tool tags (documentation/explanation)
+    // These should NOT be buffered waiting for a closing tag
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'You can use `<tool_use>` blocks to call tools. ' }
+          ]
+        }
+      }
+    });
+
+    // Send more text to verify the quoted tag wasn't buffered
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'Here is an example.' }
+          ]
+        }
+      }
+    });
+
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    // The quoted <tool_use> should be emitted as text, not buffered
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+
+    // Both chunks should have been emitted (not buffered)
+    expect(textDeltas).toContain('`<tool_use>`');
+    expect(textDeltas).toContain('Here is an example');
+
+    // No tool_use blocks should be created from quoted tags
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(0);
+  });
 });
