@@ -1,52 +1,9 @@
 import { Router } from 'express';
-import { getDefaultClient } from '../services/hopgptClient.js';
+import { getDefaultClient, getTokenExpiryInfo } from '../services/hopgptClient.js';
 import { loggers } from '../utils/logger.js';
 
 const log = loggers.auth;
 const router = Router();
-
-function getTokenExpiryInfo(token) {
-  if (!token) {
-    return null;
-  }
-
-  const parts = token.split('.');
-  if (parts.length < 2) {
-    return null;
-  }
-
-  try {
-    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
-    const decoded = Buffer.from(paddedPayload, 'base64').toString('utf8');
-    const data = JSON.parse(decoded);
-
-    if (typeof data.exp !== 'number') {
-      return null;
-    }
-
-    const expiresAtMs = data.exp * 1000;
-    if (!Number.isFinite(expiresAtMs)) {
-      return null;
-    }
-
-    const expiresAt = new Date(expiresAtMs);
-    if (Number.isNaN(expiresAt.getTime())) {
-      return null;
-    }
-
-    const expiresInSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
-    const isExpired = expiresInSeconds <= 0;
-
-    return {
-      expiresAt: expiresAt.toISOString(),
-      expiresInSeconds: Math.max(0, expiresInSeconds),
-      isExpired
-    };
-  } catch (error) {
-    return null;
-  }
-}
 
 /**
  * GET /token-status

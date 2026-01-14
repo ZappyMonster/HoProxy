@@ -248,27 +248,23 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
  */
 async function handleNonStreamingRequest(client, hopGPTRequest, transformer, res, sessionId) {
   log.debug('Starting non-streaming response', { sessionId: sessionId.slice(0, 8) + '...' });
-  try {
-    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: false });
+  const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: false });
 
-    // Process all events to accumulate the full response
-    await parseSSEStream(hopGPTResponse, (event) => {
-      transformer.transformEvent(event);
-    });
+  // Process all events to accumulate the full response
+  await parseSSEStream(hopGPTResponse, (event) => {
+    transformer.transformEvent(event);
+  });
 
-    // Update conversation state BEFORE sending response to prevent race condition
-    // where Claude Code makes another request before state is updated
-    const nextState = transformer.getConversationState();
-    if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
-      updateConversationState(sessionId, nextState);
-    }
-
-    // Build and send the complete response
-    const response = transformer.buildNonStreamingResponse();
-    res.json(response);
-  } catch (error) {
-    throw error;
+  // Update conversation state BEFORE sending response to prevent race condition
+  // where Claude Code makes another request before state is updated
+  const nextState = transformer.getConversationState();
+  if (nextState?.lastAssistantMessageId || nextState?.conversationId || nextState?.systemPrompt) {
+    updateConversationState(sessionId, nextState);
   }
+
+  // Build and send the complete response
+  const response = transformer.buildNonStreamingResponse();
+  res.json(response);
 }
 
 /**

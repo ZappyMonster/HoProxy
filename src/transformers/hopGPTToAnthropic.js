@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { cacheThinkingSignature, cacheToolSignature } from './signatureCache.js';
+import { normalizeMaxTokens, normalizeStopSequences } from './anthropicToHopGPT.js';
 import { loggers } from '../utils/logger.js';
 
 const log = loggers.transform;
@@ -12,7 +13,7 @@ const MCP_TOOL_CALL_START_TAG = '<mcp_tool_call';
 // Also matches <function_calls> used by Claude Code
 const FUNCTION_CALLS_BLOCK_RE = /<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>/gi;
 const FUNCTION_CALLS_START_TAG = '<function_calls';
-const ANTML_FUNCTION_CALLS_START_TAG = '<function_calls';
+const ANTML_FUNCTION_CALLS_START_TAG = '<antml:function_calls';
 
 // Pattern for <tool_call> blocks with JSON (another OpenCode format)
 const TOOL_CALL_JSON_BLOCK_RE = /<tool_call\b[\s\S]*?<\/tool_call>/gi;
@@ -25,11 +26,18 @@ const TOOL_USE_START_TAG = '<tool_use';
 // Also matches <invoke> used by Claude Code
 const INVOKE_BLOCK_RE = /<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>/gi;
 const INVOKE_START_TAG = '<invoke';
-const ANTML_INVOKE_START_TAG = '<invoke';
+const ANTML_INVOKE_START_TAG = '<antml:invoke';
 
 // Combined pattern for any tool call format
 // Includes antml: namespace variants used by Claude Code
 const ANY_TOOL_CALL_BLOCK_RE = /(?:<mcp_tool_call\b[\s\S]*?<\/mcp_tool_call>|<(?:antml:)?function_calls\b[\s\S]*?<\/(?:antml:)?function_calls>|<tool_call\b[\s\S]*?<\/tool_call>|<tool_use\b[\s\S]*?<\/tool_use>|<(?:antml:)?invoke\b[\s\S]*?<\/(?:antml:)?invoke>)/gi;
+
+const FUNCTION_CALLS_TAGS = [FUNCTION_CALLS_START_TAG, ANTML_FUNCTION_CALLS_START_TAG];
+const INVOKE_TAGS = [INVOKE_START_TAG, ANTML_INVOKE_START_TAG];
+
+function includesAny(haystack, needles) {
+  return needles.some(tag => haystack.includes(tag));
+}
 
 function extractXmlTagValue(source, tagName) {
   if (!source) {
@@ -47,15 +55,6 @@ function extractXmlAttribute(source, tagName, attrName) {
   const matcher = new RegExp(`<${tagName}[^>]*\\s${attrName}=["']([^"']*)["']`, 'i');
   const match = source.match(matcher);
   return match ? match[1] : null;
-}
-
-function extractXmlTagContent(source, tagName) {
-  if (!source) {
-    return null;
-  }
-  const matcher = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, 'i');
-  const match = source.match(matcher);
-  return match ? match[1].trim() : null;
 }
 
 function stripCdata(source) {
@@ -327,7 +326,7 @@ function parseToolUseBlock(block) {
   }
 
   const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
-  const inputText = stripCdata(extractXmlTagContent(block, 'tool_use'));
+  const inputText = stripCdata(extractXmlTagValue(block, 'tool_use'));
   let parsedArgs = {};
 
   if (inputText && inputText.length > 0) {
@@ -359,14 +358,14 @@ function parseToolUseBlock(block) {
  */
 function parseAnyToolCallBlock(block) {
   const blockLower = block.toLowerCase();
-  if (blockLower.includes('<mcp_tool_call')) {
+  if (blockLower.includes(MCP_TOOL_CALL_START_TAG)) {
     const toolCall = parseMcpToolCallBlock(block);
     return toolCall ? [toolCall] : [];
   }
-  if (blockLower.includes('<function_calls') || blockLower.includes('<function_calls')) {
+  if (includesAny(blockLower, FUNCTION_CALLS_TAGS)) {
     return parseFunctionCallsBlock(block);
   }
-  if (blockLower.includes('<invoke') || blockLower.includes('<invoke')) {
+  if (includesAny(blockLower, INVOKE_TAGS)) {
     const toolCall = parseInvokeBlock(block);
     return toolCall ? [toolCall] : [];
   }
@@ -557,24 +556,6 @@ function generateToolUseId() {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
-}
-
-function normalizeMaxTokens(value) {
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-  const intValue = Math.floor(value);
-  return intValue > 0 ? intValue : null;
-}
-
-function normalizeStopSequences(value) {
-  if (Array.isArray(value)) {
-    return value.filter(seq => typeof seq === 'string' && seq.length > 0);
-  }
-  if (typeof value === 'string' && value.length > 0) {
-    return [value];
-  }
-  return [];
 }
 
 function mapStopReason(value) {
@@ -781,11 +762,10 @@ export class HopGPTToAnthropicTransformer {
       // Debug: Log incoming text for tool call detection
       if (process.env.HOPGPT_DEBUG === 'true') {
         const hasToolCallTag = block.text.includes('<tool_call') ||
-                               block.text.includes('<function_calls') ||
-                               block.text.includes('<function_calls') ||
-                               block.text.includes('<mcp_tool_call') ||
-                               block.text.includes('<tool_use') ||
-                               block.text.includes('<invoke');
+                               includesAny(block.text, FUNCTION_CALLS_TAGS) ||
+                               block.text.includes(MCP_TOOL_CALL_START_TAG) ||
+                               block.text.includes(TOOL_USE_START_TAG) ||
+                               includesAny(block.text, INVOKE_TAGS);
         if (hasToolCallTag) {
           console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
         }

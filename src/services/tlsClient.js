@@ -145,19 +145,6 @@ export async function tlsFetch(options) {
 }
 
 /**
- * Create a streaming TLS request that returns chunks
- * Note: node-tls-client doesn't natively support streaming,
- * so we return the full response and let the caller handle it
- * @param {object} options - Request options
- * @returns {Promise<{status: number, headers: object, body: string}>}
- */
-export async function tlsFetchStream(options) {
-  // For SSE/streaming, we still use tlsFetch but the caller
-  // will need to parse the SSE events from the response body
-  return tlsFetch(options);
-}
-
-/**
  * Get status text for HTTP status code
  */
 function getStatusText(status) {
@@ -189,4 +176,4 @@ process.on('beforeExit', async () => {
   await shutdownTLS();
 });
 
-export default { tlsFetch, tlsFetchStream, createTLSSession, ensureTLSInitialized, shutdownTLS };
+export default { tlsFetch, createTLSSession, ensureTLSInitialized, shutdownTLS };

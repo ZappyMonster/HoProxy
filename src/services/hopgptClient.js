@@ -113,7 +113,7 @@ export class HopGPTClient {
    * @param {string} browserType - 'firefox' or 'chrome' to match the browser used for cookie extraction
    * @returns {object} Headers object with browser-like values
    */
-  buildBrowserHeaders(browserType = 'firefox') {
+  buildBrowserHeaders(browserType) {
     // Detect browser type from User-Agent if available
     const detectedBrowser = this.userAgent?.toLowerCase().includes('firefox') ? 'firefox' : 'chrome';
     const browser = browserType || detectedBrowser;
@@ -309,36 +309,7 @@ export class HopGPTClient {
    * @returns {object|null} Expiry info or null if not a valid JWT
    */
   _getTokenExpiryInfo(token) {
-    if (!token) {
-      return null;
-    }
-
-    const parts = token.split('.');
-    if (parts.length < 2) {
-      return null;
-    }
-
-    try {
-      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-      const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
-      const decoded = Buffer.from(paddedPayload, 'base64').toString('utf8');
-      const data = JSON.parse(decoded);
-
-      if (typeof data.exp !== 'number') {
-        return null;
-      }
-
-      const expiresAtMs = data.exp * 1000;
-      const expiresInSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
-
-      return {
-        expiresAtMs,
-        expiresInSeconds,
-        isExpired: expiresInSeconds <= 0
-      };
-    } catch (error) {
-      return null;
-    }
+    return parseTokenExpiry(token);
   }
 
   /**
@@ -435,7 +406,7 @@ export class HopGPTClient {
       // Start with browser-like headers to pass Cloudflare
       // Use the same headers as real browser requests
       const headers = {
-        ...this.buildBrowserHeaders(),
+        ...this.buildBrowserHeaders(browserType),
         'Content-Type': 'application/json',
         'Accept': '*/*',
         'Origin': this.baseURL,
@@ -599,7 +570,7 @@ export class HopGPTClient {
     // Start with browser-like headers to pass Cloudflare
     // Accept: */* matches real browser behavior for this endpoint (from HAR capture)
     const headers = {
-      ...this.buildBrowserHeaders(),
+      ...this.buildBrowserHeaders(browserType),
       'Content-Type': 'application/json',
       'Accept': '*/*',
       'Origin': this.baseURL,
@@ -855,4 +826,65 @@ export function getDefaultClient() {
 
 export function resetDefaultClient() {
   defaultClient = null;
+}
+
+/**
+ * Parse JWT token and extract expiry information
+ * @param {string} token - JWT token
+ * @returns {object|null} Expiry info or null if not a valid JWT
+ */
+export function getTokenExpiryInfo(token) {
+  const expiry = parseTokenExpiry(token);
+  if (!expiry) {
+    return null;
+  }
+
+  const expiresAt = new Date(expiry.expiresAtMs);
+  if (Number.isNaN(expiresAt.getTime())) {
+    return null;
+  }
+
+  return {
+    expiresAt: expiresAt.toISOString(),
+    expiresAtMs: expiry.expiresAtMs,
+    expiresInSeconds: Math.max(0, expiry.expiresInSeconds),
+    isExpired: expiry.isExpired
+  };
+}
+
+function parseTokenExpiry(token) {
+  if (!token) {
+    return null;
+  }
+
+  const parts = token.split('.');
+  if (parts.length < 2) {
+    return null;
+  }
+
+  try {
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
+    const decoded = Buffer.from(paddedPayload, 'base64').toString('utf8');
+    const data = JSON.parse(decoded);
+
+    if (typeof data.exp !== 'number') {
+      return null;
+    }
+
+    const expiresAtMs = data.exp * 1000;
+    if (!Number.isFinite(expiresAtMs)) {
+      return null;
+    }
+
+    const expiresInSeconds = Math.floor((expiresAtMs - Date.now()) / 1000);
+
+    return {
+      expiresAtMs,
+      expiresInSeconds,
+      isExpired: expiresInSeconds <= 0
+    };
+  } catch (error) {
+    return null;
+  }
 }
