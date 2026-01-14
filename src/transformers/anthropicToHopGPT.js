@@ -494,7 +494,7 @@ export function normalizeSystemPrompt(system) {
   return null;
 }
 
-function normalizeMaxTokens(value) {
+export function normalizeMaxTokens(value) {
   if (!Number.isFinite(value)) {
     return null;
   }
@@ -502,7 +502,7 @@ function normalizeMaxTokens(value) {
   return intValue > 0 ? intValue : null;
 }
 
-function normalizeStopSequences(value) {
+export function normalizeStopSequences(value) {
   if (Array.isArray(value)) {
     return value.filter((seq) => typeof seq === "string" && seq.length > 0);
   }

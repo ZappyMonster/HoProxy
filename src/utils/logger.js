@@ -218,7 +218,6 @@ export function requestLoggerMiddleware() {
     // Log response when finished
     res.on('finish', () => {
       const duration = Date.now() - req.startTime;
-      const level = res.statusCode >= 400 ? 'error' : 'info';
       logger.debug(`${req.method} ${req.path} -> ${res.statusCode}`, {
         requestId: req.id,
         status: res.statusCode,
