@@ -623,7 +623,9 @@ export function transformAnthropicToHopGPT(
   });
   
   const imageDetail = "high";
-  const toolCallStopSequence = "</mcp_tool_call>";
+  // Stop sequence must match the format we tell the model to use in buildToolInjectionPrompt
+  // The model is instructed to use <tool_call>...</tool_call> format
+  const toolCallStopSequence = "</tool_call>";
   const normalizedTools = normalizeToolDefinitions(tools);
 
   // Get thinking configuration
