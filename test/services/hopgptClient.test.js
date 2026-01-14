@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HopGPTClient, HopGPTError } from '../../src/services/hopgptClient.js';
 import * as tlsClient from '../../src/services/tlsClient.js';
+import {
+  TokenRefreshError,
+  RefreshTokenExpiredError,
+  CloudflareBlockedError,
+  NetworkError
+} from '../../src/errors/authErrors.js';
 
 function createMockTLSResponse({
   ok = true,
@@ -142,22 +148,28 @@ describe('HopGPTClient', () => {
         body: 'rate limited',
         headers: { 'retry-after': '1' }
       });
-      const successResponse = createMockTLSResponse({
+      const chatSuccessResponse = createMockTLSResponse({
         ok: true,
         status: 200,
         body: 'data: {"type":"text"}\n\n'
+      });
+      const refreshSuccessResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ token: 'new-token' }),
+        headers: { 'set-cookie': ['refreshToken=new-refresh; Path=/;'] }
       });
 
       let chatCalls = 0;
       tlsFetchSpy.mockImplementation(async (options) => {
         if (options.url.endsWith('/api/auth/refresh')) {
-          return successResponse;  // Refresh succeeds
+          return refreshSuccessResponse;  // Refresh succeeds with token
         }
         chatCalls++;
         if (chatCalls === 1) {
           return rateLimitResponse;
         }
-        return successResponse;
+        return chatSuccessResponse;
       });
 
     const client = new HopGPTClient({
@@ -183,16 +195,17 @@ describe('HopGPTClient', () => {
         body: 'rate limited',
         headers: {}
       });
-      const successResponse = createMockTLSResponse({
+      const refreshSuccessResponse = createMockTLSResponse({
         ok: true,
         status: 200,
-        body: '{}'
+        body: JSON.stringify({ token: 'new-token' }),
+        headers: { 'set-cookie': ['refreshToken=new-refresh; Path=/;'] }
       });
 
       let chatCalls = 0;
       tlsFetchSpy.mockImplementation(async (options) => {
         if (options.url.endsWith('/api/auth/refresh')) {
-          return successResponse;  // Refresh succeeds
+          return refreshSuccessResponse;  // Refresh succeeds with token
         }
         chatCalls++;
         return rateLimitResponse;  // Chat always returns 429
@@ -223,16 +236,17 @@ describe('HopGPTClient', () => {
         body: 'rate limited',
         headers: { 'retry-after': '60' }  // 60 seconds
       });
-      const successResponse = createMockTLSResponse({
+      const refreshSuccessResponse = createMockTLSResponse({
         ok: true,
         status: 200,
-        body: '{}'
+        body: JSON.stringify({ token: 'new-token' }),
+        headers: { 'set-cookie': ['refreshToken=new-refresh; Path=/;'] }
       });
 
       let chatCalls = 0;
       tlsFetchSpy.mockImplementation(async (options) => {
         if (options.url.endsWith('/api/auth/refresh')) {
-          return successResponse;  // Refresh succeeds
+          return refreshSuccessResponse;  // Refresh succeeds with token
         }
         chatCalls++;
         return rateLimitResponse;
@@ -278,6 +292,145 @@ describe('HopGPTClient', () => {
       const delay1 = client._calculateBackoffDelay(1, null);
       expect(delay1).toBeGreaterThanOrEqual(2000);
       expect(delay1).toBeLessThanOrEqual(2600);
+    });
+  });
+
+  describe('token refresh error handling', () => {
+    it('returns false when refresh response has no token (P0 #2 fix)', async () => {
+      const refreshResponseNoToken = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ message: 'success but no token' }),
+        headers: {}
+      });
+
+      tlsFetchSpy.mockResolvedValue(refreshResponseNoToken);
+
+      const client = new HopGPTClient({
+        refreshToken: 'valid-refresh',
+        autoPersist: false
+      });
+
+      const result = await client.refreshTokens();
+      expect(result).toBe(false);
+    });
+
+    it('throws RefreshTokenExpiredError on 401 response (P1 #5 fix)', async () => {
+      const unauthorizedResponse = createMockTLSResponse({
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        body: 'Token expired'
+      });
+
+      tlsFetchSpy.mockResolvedValue(unauthorizedResponse);
+
+      const client = new HopGPTClient({
+        refreshToken: 'expired-refresh',
+        autoPersist: false
+      });
+
+      await expect(client.refreshTokens()).rejects.toThrow(RefreshTokenExpiredError);
+    });
+
+    it('throws RefreshTokenExpiredError on 403 response (P1 #5 fix)', async () => {
+      const forbiddenResponse = createMockTLSResponse({
+        ok: false,
+        status: 403,
+        statusText: 'Forbidden',
+        body: 'Access denied'
+      });
+
+      tlsFetchSpy.mockResolvedValue(forbiddenResponse);
+
+      const client = new HopGPTClient({
+        refreshToken: 'invalid-refresh',
+        autoPersist: false
+      });
+
+      await expect(client.refreshTokens()).rejects.toThrow(RefreshTokenExpiredError);
+    });
+
+    it('throws CloudflareBlockedError on 503 response (P1 #5 fix)', async () => {
+      const cfBlockedResponse = createMockTLSResponse({
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        body: 'Cloudflare error'
+      });
+
+      tlsFetchSpy.mockResolvedValue(cfBlockedResponse);
+
+      const client = new HopGPTClient({
+        refreshToken: 'valid-refresh',
+        autoPersist: false
+      });
+
+      await expect(client.refreshTokens()).rejects.toThrow(CloudflareBlockedError);
+    });
+
+    it('throws NetworkError on network failure (P1 #5 fix)', async () => {
+      tlsFetchSpy.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      const client = new HopGPTClient({
+        refreshToken: 'valid-refresh',
+        autoPersist: false
+      });
+
+      await expect(client.refreshTokens()).rejects.toThrow(NetworkError);
+    });
+
+    it('throws TokenRefreshError when proactive refresh fails (P0 #3 fix)', async () => {
+      const refreshFailResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({}),  // No token in response
+        headers: {}
+      });
+
+      tlsFetchSpy.mockResolvedValue(refreshFailResponse);
+
+      const client = new HopGPTClient({
+        baseURL: 'https://example.com',
+        bearerToken: 'invalid-token',  // Non-JWT triggers proactive refresh
+        refreshToken: 'valid-refresh',
+        autoPersist: false
+      });
+
+      await expect(client.sendMessage({ text: 'hello' })).rejects.toThrow(TokenRefreshError);
+    });
+
+    it('concurrent refreshTokens() calls share the same promise (P0 #1 fix)', async () => {
+      let refreshCallCount = 0;
+      const refreshSuccessResponse = createMockTLSResponse({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ token: 'new-token' }),
+        headers: { 'set-cookie': ['refreshToken=new-refresh; Path=/;'] }
+      });
+
+      tlsFetchSpy.mockImplementation(async () => {
+        refreshCallCount++;
+        // Add small delay to ensure both calls happen before first completes
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return refreshSuccessResponse;
+      });
+
+      const client = new HopGPTClient({
+        refreshToken: 'valid-refresh',
+        autoPersist: false
+      });
+
+      // Start two concurrent refresh calls
+      const [result1, result2] = await Promise.all([
+        client.refreshTokens(),
+        client.refreshTokens()
+      ]);
+
+      expect(result1).toBe(true);
+      expect(result2).toBe(true);
+      // Should only make ONE actual HTTP call due to mutex
+      expect(refreshCallCount).toBe(1);
     });
   });
 });
