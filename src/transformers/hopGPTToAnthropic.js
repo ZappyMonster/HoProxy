@@ -81,6 +81,63 @@ function stripCdata(source) {
   return source;
 }
 
+function escapeUnescapedControlChars(jsonStr) {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < jsonStr.length; i++) {
+    const ch = jsonStr[i];
+    if (inString) {
+      if (escaped) {
+        result += ch;
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        result += ch;
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+        result += ch;
+        continue;
+      }
+      if (ch === '\n') {
+        result += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        result += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        result += '\\t';
+        continue;
+      }
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        result += `\\u${code.toString(16).padStart(4, '0')}`;
+        continue;
+      }
+      result += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    }
+    result += ch;
+  }
+
+  return result;
+}
+
 function parseEmbeddedJson(value) {
   if (typeof value !== 'string') {
     return value;
@@ -107,16 +164,19 @@ function parseJsonWithRepair(jsonText) {
   if (!cleaned) {
     return null;
   }
-  try {
-    return JSON.parse(cleaned);
-  } catch (error) {
+  const escaped = escapeUnescapedControlChars(cleaned);
+  const attempts = [cleaned, escaped, repairMalformedArrayJson(cleaned), repairMalformedArrayJson(escaped)]
+    .filter((value, index, self) => typeof value === 'string' && self.indexOf(value) === index);
+
+  for (const attempt of attempts) {
     try {
-      const repaired = repairMalformedArrayJson(cleaned);
-      return JSON.parse(repaired);
-    } catch (repairError) {
-      return null;
+      return JSON.parse(attempt);
+    } catch (error) {
+      continue;
     }
   }
+
+  return null;
 }
 
 function parseToolCallJsonContent(jsonContent) {
@@ -144,6 +204,47 @@ function getLeadingTagName(block) {
   return match ? match[1].toLowerCase() : null;
 }
 
+function findMatchingBrace(source, startIndex) {
+  if (!source || startIndex < 0 || startIndex >= source.length || source[startIndex] !== '{') {
+    return -1;
+  }
+  let braceCount = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = startIndex; i < source.length; i++) {
+    const ch = source[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === '{') {
+      braceCount++;
+    } else if (ch === '}') {
+      braceCount--;
+      if (braceCount === 0) {
+        return i;
+      }
+    }
+  }
+
+  return -1;
+}
+
 /**
  * Repair malformed JSON where array brackets are missing.
  * Fixes patterns like: {"key": {"id": "1"}, {"id": "2"}}
@@ -164,82 +265,120 @@ function repairMalformedArrayJson(jsonStr) {
   // which indicates adjacent objects that should be in an array
 
   let result = jsonStr;
+  const modifications = [];
+  const valueStarts = [];
+  let inString = false;
+  let escaped = false;
 
-  // Look for pattern: "key": {object}, {object}...}
-  // The regex finds a key followed by objects separated by }, {
-  // We need to wrap those objects in array brackets
+  for (let i = 0; i < jsonStr.length; i++) {
+    const ch = jsonStr[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
 
-  // First, try to find keys whose values are malformed arrays
-  // Pattern: "key": {first object}, {second object}, ... }
-  // The issue is after "key": we have {obj}, {obj} instead of [{obj}, {obj}]
-
-  const keyValuePattern = /"([^"]+)":\s*(\{)/g;
-  let match;
-  let modifications = [];
-
-  while ((match = keyValuePattern.exec(jsonStr)) !== null) {
-    const keyName = match[1];
-    const startOfValue = match.index + match[0].length - 1; // Position of first {
-
-    // Try to find if this is a malformed array by checking what comes after the first object
-    // We need to find matching braces
-    let braceCount = 0;
-    let i = startOfValue;
-    let firstObjEnd = -1;
-
-    // Find the end of the first object
-    for (; i < jsonStr.length; i++) {
-      if (jsonStr[i] === '{') braceCount++;
-      else if (jsonStr[i] === '}') {
-        braceCount--;
-        if (braceCount === 0) {
-          firstObjEnd = i;
+    if (ch === '"') {
+      let j = i + 1;
+      let keyEscaped = false;
+      for (; j < jsonStr.length; j++) {
+        const next = jsonStr[j];
+        if (keyEscaped) {
+          keyEscaped = false;
+          continue;
+        }
+        if (next === '\\') {
+          keyEscaped = true;
+          continue;
+        }
+        if (next === '"') {
           break;
         }
       }
-    }
 
-    if (firstObjEnd === -1) continue;
-
-    // Check if there's a comma followed by another object immediately after
-    let afterFirstObj = jsonStr.slice(firstObjEnd + 1).match(/^\s*,\s*\{/);
-    if (afterFirstObj) {
-      // This looks like a malformed array - we have }, { pattern
-      // Find where the array should end (the closing } of the parent object or end of string)
-
-      // Find all consecutive objects
-      let arrayEnd = firstObjEnd;
-      let pos = firstObjEnd + 1;
-
-      while (pos < jsonStr.length) {
-        // Skip whitespace and comma
-        const remaining = jsonStr.slice(pos);
-        const nextObjMatch = remaining.match(/^\s*,\s*\{/);
-        if (!nextObjMatch) break;
-
-        pos += nextObjMatch[0].length - 1; // Position at the {
-
-        // Find end of this object
-        braceCount = 0;
-        for (let j = pos; j < jsonStr.length; j++) {
-          if (jsonStr[j] === '{') braceCount++;
-          else if (jsonStr[j] === '}') {
-            braceCount--;
-            if (braceCount === 0) {
-              arrayEnd = j;
-              pos = j + 1;
-              break;
-            }
-          }
-        }
+      if (j >= jsonStr.length) {
+        break;
       }
 
-      // Now we know the array should span from startOfValue to arrayEnd
-      modifications.push({
-        insertOpenBracket: startOfValue,
-        insertCloseBracket: arrayEnd + 1
-      });
+      let k = j + 1;
+      while (k < jsonStr.length && /\s/.test(jsonStr[k])) {
+        k++;
+      }
+      if (jsonStr[k] !== ':') {
+        i = j;
+        continue;
+      }
+      k++;
+      while (k < jsonStr.length && /\s/.test(jsonStr[k])) {
+        k++;
+      }
+      if (jsonStr[k] === '{') {
+        valueStarts.push(k);
+      }
+      i = j;
+      continue;
     }
+  }
+
+  for (const startOfValue of valueStarts) {
+    const firstObjEnd = findMatchingBrace(jsonStr, startOfValue);
+    if (firstObjEnd === -1) {
+      continue;
+    }
+
+    let pos = firstObjEnd + 1;
+    while (pos < jsonStr.length && /\s/.test(jsonStr[pos])) {
+      pos++;
+    }
+    if (jsonStr[pos] !== ',') {
+      continue;
+    }
+    pos++;
+    while (pos < jsonStr.length && /\s/.test(jsonStr[pos])) {
+      pos++;
+    }
+    if (jsonStr[pos] !== '{') {
+      continue;
+    }
+
+    let arrayEnd = firstObjEnd;
+    let nextObjStart = pos;
+    while (nextObjStart < jsonStr.length && jsonStr[nextObjStart] === '{') {
+      const nextObjEnd = findMatchingBrace(jsonStr, nextObjStart);
+      if (nextObjEnd === -1) {
+        break;
+      }
+      arrayEnd = nextObjEnd;
+      let afterObj = nextObjEnd + 1;
+      while (afterObj < jsonStr.length && /\s/.test(jsonStr[afterObj])) {
+        afterObj++;
+      }
+      if (jsonStr[afterObj] !== ',') {
+        break;
+      }
+      afterObj++;
+      while (afterObj < jsonStr.length && /\s/.test(jsonStr[afterObj])) {
+        afterObj++;
+      }
+      if (jsonStr[afterObj] !== '{') {
+        break;
+      }
+      nextObjStart = afterObj;
+    }
+
+    modifications.push({
+      insertOpenBracket: startOfValue,
+      insertCloseBracket: arrayEnd + 1
+    });
   }
 
   // Apply modifications in reverse order to preserve positions
@@ -264,17 +403,12 @@ function parseMcpToolCallBlock(block) {
   let parsedArgs = {};
   if (argsText && argsText.trim().length > 0) {
     const trimmedArgs = argsText.trim();
-    try {
-      parsedArgs = JSON.parse(trimmedArgs);
-    } catch (error) {
-      // Try to repair malformed JSON (e.g., missing array brackets)
-      try {
-        const repaired = repairMalformedArrayJson(trimmedArgs);
-        parsedArgs = JSON.parse(repaired);
-      } catch (repairError) {
-        log.warn('Failed to parse MCP tool call arguments', { error: error.message });
-        parsedArgs = { _raw: trimmedArgs };
-      }
+    const repairedArgs = parseJsonWithRepair(trimmedArgs);
+    if (repairedArgs !== null) {
+      parsedArgs = repairedArgs;
+    } else {
+      log.warn('Failed to parse MCP tool call arguments');
+      parsedArgs = { _raw: trimmedArgs };
     }
   }
 
@@ -390,18 +524,8 @@ function parseToolUseBlock(block) {
 
   if (inputText && inputText.length > 0) {
     const trimmedInput = inputText.trim();
-    try {
-      parsedArgs = JSON.parse(trimmedInput);
-    } catch (error) {
-      // Try to repair malformed JSON (e.g., missing array brackets)
-      try {
-        const repaired = repairMalformedArrayJson(trimmedInput);
-        parsedArgs = JSON.parse(repaired);
-      } catch (repairError) {
-        // If all parsing fails, keep as raw string
-        parsedArgs = trimmedInput;
-      }
-    }
+    const repairedInput = parseJsonWithRepair(trimmedInput);
+    parsedArgs = repairedInput !== null ? repairedInput : trimmedInput;
   }
 
   return {

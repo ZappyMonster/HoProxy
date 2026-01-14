@@ -910,6 +910,59 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(input.todos[2].id).toBe('3');
   });
 
+  it('repairs tool_call JSON with unescaped newlines in string values', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolUseWithNewlines = `<tool_use>
+{"name": "write", "parameters": {"filePath": "/tmp/example.txt", "content": "line1
+line2
+line3"}}
+</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: toolUseWithNewlines }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('write');
+    expect(toolUseBlocks[0].input.filePath).toBe('/tmp/example.txt');
+    expect(toolUseBlocks[0].input.content).toBe('line1\nline2\nline3');
+  });
+
   it('extracts tool_use blocks with tool_call JSON and mismatched closing tag', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false
