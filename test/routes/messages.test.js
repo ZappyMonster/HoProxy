@@ -5,6 +5,7 @@ import messagesRouter from '../../src/routes/messages.js';
 import { readFixture } from '../helpers/fixtures.js';
 import { createSseResponseFromEvents } from '../helpers/sse.js';
 import { getDefaultClient, HopGPTError } from '../../src/services/hopgptClient.js';
+import { RefreshTokenExpiredError, CloudflareBlockedError } from '../../src/errors/authErrors.js';
 
 vi.mock('../../src/services/hopgptClient.js', async () => {
   const actual = await vi.importActual('../../src/services/hopgptClient.js');
@@ -140,5 +141,41 @@ describe('messages routes', () => {
 
     expect(response.status).toBe(429);
     expect(response.body.error.type).toBe('rate_limit_error');
+  });
+
+  it('returns authentication_error when refresh token expired', async () => {
+    const mockClient = {
+      validateAuth: () => ({ valid: true, missing: [], warnings: [] }),
+      sendMessage: vi.fn()
+    };
+    mockClient.sendMessage.mockRejectedValue(new RefreshTokenExpiredError());
+    getDefaultClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    const requestBody = await readFixture('anthropic-request-basic.json');
+    const response = await request(app)
+      .post('/v1/messages')
+      .send(requestBody);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.type).toBe('authentication_error');
+  });
+
+  it('returns api_error when Cloudflare blocks refresh', async () => {
+    const mockClient = {
+      validateAuth: () => ({ valid: true, missing: [], warnings: [] }),
+      sendMessage: vi.fn()
+    };
+    mockClient.sendMessage.mockRejectedValue(new CloudflareBlockedError());
+    getDefaultClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    const requestBody = await readFixture('anthropic-request-basic.json');
+    const response = await request(app)
+      .post('/v1/messages')
+      .send(requestBody);
+
+    expect(response.status).toBe(503);
+    expect(response.body.error.type).toBe('api_error');
   });
 });
