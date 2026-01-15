@@ -398,6 +398,101 @@ function parseToolCallJsonContent(jsonContent) {
   };
 }
 
+function pickFirstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function normalizeQuestionOption(option) {
+  if (typeof option === 'string') {
+    return { description: option };
+  }
+  if (!option || typeof option !== 'object' || Array.isArray(option)) {
+    return option;
+  }
+  if (typeof option.description === 'string') {
+    return option;
+  }
+
+  const fallback = pickFirstString(option.label, option.value, option.text, option.title, option.name);
+  if (fallback !== null) {
+    return { ...option, description: fallback };
+  }
+  if (option.description !== undefined) {
+    return { ...option, description: String(option.description) };
+  }
+  return { ...option, description: '' };
+}
+
+function normalizeQuestionsInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return input;
+  }
+  if (!Array.isArray(input.questions)) {
+    return input;
+  }
+
+  let questionsChanged = false;
+  const normalizedQuestions = input.questions.map((question) => {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) {
+      return question;
+    }
+
+    let questionChanged = false;
+    let normalized = question;
+
+    if (typeof question.header !== 'string' || question.header.trim().length === 0) {
+      const headerFallback = pickFirstString(
+        question.question,
+        question.title,
+        question.text,
+        question.prompt
+      );
+      if (headerFallback) {
+        normalized = { ...normalized, header: headerFallback };
+        questionChanged = true;
+      }
+    }
+
+    if (Array.isArray(question.options)) {
+      let optionsChanged = false;
+      const normalizedOptions = question.options.map((option) => {
+        const normalizedOption = normalizeQuestionOption(option);
+        if (normalizedOption !== option) {
+          optionsChanged = true;
+        }
+        return normalizedOption;
+      });
+      if (optionsChanged) {
+        normalized = { ...normalized, options: normalizedOptions };
+        questionChanged = true;
+      }
+    }
+
+    if (questionChanged) {
+      questionsChanged = true;
+      return normalized;
+    }
+    return question;
+  });
+
+  if (!questionsChanged) {
+    return input;
+  }
+  return { ...input, questions: normalizedQuestions };
+}
+
+function normalizeToolInput(toolName, input) {
+  if (!input || typeof input !== 'object') {
+    return input;
+  }
+  return normalizeQuestionsInput(input);
+}
+
 function getLeadingTagName(block) {
   if (!block) {
     return null;
@@ -1113,7 +1208,7 @@ export class HopGPTToAnthropicTransformer {
             type: 'tool_use',
             id: segment.toolCall.toolUseId || generateToolUseId(),
             name: segment.toolCall.toolName,
-            input: segment.toolCall.arguments
+            input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments)
           };
           events.push(...this._processToolUseBlock(toolBlock));
         }
@@ -1177,7 +1272,7 @@ export class HopGPTToAnthropicTransformer {
               type: 'tool_use',
               id: segment.toolCall.toolUseId || generateToolUseId(),
               name: segment.toolCall.toolName,
-              input: segment.toolCall.arguments || {}
+              input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments || {})
             });
           }
         }
@@ -1193,6 +1288,7 @@ export class HopGPTToAnthropicTransformer {
             input = { _raw: input };
           }
         }
+        input = normalizeToolInput(block.name, input);
 
         this.contentBlocks.push({
           type: 'tool_use',
@@ -1285,7 +1381,8 @@ export class HopGPTToAnthropicTransformer {
         inputDelta = block.input;
         this.currentToolUse.inputJson += inputDelta;
       } else if (typeof block.input === 'object') {
-        inputDelta = JSON.stringify(block.input);
+        const normalizedInput = normalizeToolInput(toolName, block.input);
+        inputDelta = JSON.stringify(normalizedInput);
         this.currentToolUse.inputJson = inputDelta;
       }
 
@@ -1621,6 +1718,7 @@ export class HopGPTToAnthropicTransformer {
             input = { _raw: toolUse.inputJson };
           }
         }
+        input = normalizeToolInput(toolUse.name, input);
         content.push({
           type: 'tool_use',
           id: toolUse.id,
