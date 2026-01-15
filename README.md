@@ -96,7 +96,7 @@ Create or edit `~/.claude/settings.json`:
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "test",
     "ANTHROPIC_BASE_URL": "http://localhost:3001",
-    "ANTHROPIC_MODEL": "claude-sonnet-4.5"
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5"
   }
 }
 ```
@@ -109,7 +109,7 @@ If you prefer shell environment variables instead of `settings.json`:
 ```bash
 export ANTHROPIC_AUTH_TOKEN=test
 export ANTHROPIC_BASE_URL=http://localhost:3001
-export ANTHROPIC_MODEL=claude-sonnet-4.5
+export ANTHROPIC_MODEL=claude-sonnet-4-5
 ```
 
 ### 5) Troubleshooting common issues
@@ -126,14 +126,16 @@ export ANTHROPIC_MODEL=claude-sonnet-4.5
 
 | Model (canonical) | Capability notes |
 |-------------------|------------------|
-| `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. |
-| `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. |
-| `claude-haiku-4.5` | Fastest model; best for low-latency tasks. |
+| `claude-opus-4-5` | Highest quality; best for complex reasoning and long-form outputs. |
+| `claude-sonnet-4-5` | Balanced speed/quality; good default for most tasks. |
+| `claude-haiku-4-5` | Fastest model; best for low-latency tasks. |
 
 Aliases accepted by the proxy include:
-- `claude-opus-4-5`, `claude-opus-4-5-thinking`, `claude-opus-4.5-thinking`, `claude-4-5-opus`, `claude-4.5-opus`, `opus-4-5`, `opus-4.5`
-- `claude-sonnet-4-5`, `claude-sonnet-4-5-thinking`, `claude-sonnet-4.5-thinking`, `claude-4-5-sonnet`, `claude-4.5-sonnet`, `sonnet-4-5`, `sonnet-4.5`
-- `claude-haiku-4-5`, `claude-haiku-4-5-thinking`, `claude-haiku-4.5-thinking`, `claude-4-5-haiku`, `claude-4.5-haiku`, `haiku-4-5`, `haiku-4.5`
+- `claude-opus-4.5`, `claude-opus-4-5-thinking`, `claude-opus-4.5-thinking`
+- `claude-sonnet-4.5`, `claude-sonnet-4-5-thinking`, `claude-sonnet-4.5-thinking`
+- `claude-haiku-4.5`, `claude-haiku-4-5-thinking`, `claude-haiku-4.5-thinking`
+
+**Note:** The `-thinking` suffix is accepted for input but not included in canonical model names returned by `/v1/models`. The proxy enables thinking mode internally based on model capabilities.
 
 ## OpenCode Setup
 
@@ -268,7 +270,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-4.5",
+    model="claude-sonnet-4-5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -286,7 +288,7 @@ const client = new Anthropic({
 });
 
 const message = await client.messages.create({
-  model: 'claude-sonnet-4.5',
+  model: 'claude-sonnet-4-5',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Hello!' }]
 });
@@ -302,7 +304,7 @@ If your SDK version does not support `baseURL`, use the `curl` example below ins
 curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4.5",
+    "model": "claude-sonnet-4-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -413,10 +415,12 @@ HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 src/
 ├── index.js                    # Express server entry point
 ├── extract-credentials.js      # Puppeteer credential extraction script (npm run extract)
+├── errors/
+│   └── authErrors.js           # Authentication error classes
 ├── routes/
 │   ├── messages.js             # /v1/messages endpoint
 │   ├── models.js               # /v1/models endpoints
-│   └── refreshToken.js         # /refresh-token endpoint
+│   └── refreshToken.js         # /refresh-token and /token-status endpoints
 ├── transformers/
 │   ├── anthropicToHopGPT.js    # Request transformation
 │   ├── hopGPTToAnthropic.js    # SSE response transformation
