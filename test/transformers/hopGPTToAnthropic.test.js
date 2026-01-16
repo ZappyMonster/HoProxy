@@ -1409,7 +1409,7 @@ line3"}}
     expect(toolBlocks.length).toBe(0);
   });
 
-  it('emits malformed tool_call JSON as text instead of buffering', () => {
+  it('repairs tool_call JSON with unescaped quotes in string values', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
       thinkingEnabled: false
     });
@@ -1437,13 +1437,57 @@ line3"}}
       }
     });
 
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(1);
+    expect(toolBlocks[0].data?.content_block?.name).toBe('Edit');
+
+    const inputJson = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'input_json_delta')
+      .map(evt => evt.data.delta.partial_json)
+      .join('');
+    const parsedInput = JSON.parse(inputJson);
+    expect(parsedInput.path).toBe('foo.txt');
+    expect(parsedInput.content).toBe('uncaptured " quote');
+  });
+
+  it('emits unrecoverable tool_call JSON as text instead of buffering', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+
+    const chunk = '<tool_call>{"name": "Edit", "parameters": {"path": "foo.txt", "content": "unterminated}}</tool_call>';
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [{ type: 'text', text: chunk }]
+        }
+      }
+    });
+
     const textDeltas = events
       .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
       .map(evt => evt.data.delta.text)
       .join('');
 
     expect(textDeltas).toContain('<tool_call>');
-    expect(textDeltas).toContain('uncaptured');
+    expect(textDeltas).toContain('unterminated');
 
     const toolBlocks = events.filter(evt =>
       evt.event === 'content_block_start' &&

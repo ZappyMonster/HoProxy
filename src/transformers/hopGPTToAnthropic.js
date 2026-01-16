@@ -53,6 +53,8 @@ const TOOL_TAG_CLOSINGS = {
   'tool_use': ['</tool_use>', '</tool_call>']
 };
 
+const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+
 function includesAny(haystack, needles) {
   return needles.some(tag => haystack.includes(tag));
 }
@@ -350,6 +352,89 @@ function escapeUnescapedControlChars(jsonStr) {
   return result;
 }
 
+function findNextNonWhitespace(source, startIndex) {
+  if (!source || startIndex < 0) {
+    return null;
+  }
+  for (let i = startIndex; i < source.length; i++) {
+    const ch = source[i];
+    if (!/\s/.test(ch)) {
+      return ch;
+    }
+  }
+  return null;
+}
+
+function repairMalformedStringEscapes(jsonStr) {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < jsonStr.length; i++) {
+    const ch = jsonStr[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        result += ch;
+        continue;
+      }
+
+      if (ch === '\\') {
+        const next = jsonStr[i + 1];
+        if (!next) {
+          result += '\\\\';
+          continue;
+        }
+        if (VALID_JSON_ESCAPES.has(next)) {
+          if (next === 'u') {
+            const hex = jsonStr.slice(i + 2, i + 6);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+              result += '\\\\';
+              continue;
+            }
+          }
+          result += ch;
+          escaped = true;
+          continue;
+        }
+        result += '\\\\';
+        continue;
+      }
+
+      if (ch === '"') {
+        const nextNonWhitespace = findNextNonWhitespace(jsonStr, i + 1);
+        if (nextNonWhitespace === null ||
+            nextNonWhitespace === ':' ||
+            ',}]'.includes(nextNonWhitespace)) {
+          inString = false;
+          result += ch;
+        } else {
+          result += '\\"';
+        }
+        continue;
+      }
+
+      result += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      continue;
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
 function parseEmbeddedJson(value) {
   if (typeof value !== 'string') {
     return value;
@@ -377,8 +462,25 @@ function parseJsonWithRepair(jsonText) {
     return null;
   }
   const escaped = escapeUnescapedControlChars(cleaned);
-  const attempts = [cleaned, escaped, repairMalformedArrayJson(cleaned), repairMalformedArrayJson(escaped)]
-    .filter((value, index, self) => typeof value === 'string' && self.indexOf(value) === index);
+  const attempts = new Set();
+  const addAttempt = (value) => {
+    if (typeof value === 'string' && value.length > 0) {
+      attempts.add(value);
+    }
+  };
+
+  const baseValues = [cleaned, escaped];
+  for (const base of baseValues) {
+    addAttempt(base);
+
+    const arrayRepaired = repairMalformedArrayJson(base);
+    addAttempt(arrayRepaired);
+
+    const stringRepaired = repairMalformedStringEscapes(base);
+    addAttempt(stringRepaired);
+    addAttempt(repairMalformedArrayJson(stringRepaired));
+    addAttempt(repairMalformedStringEscapes(arrayRepaired));
+  }
 
   for (const attempt of attempts) {
     try {
