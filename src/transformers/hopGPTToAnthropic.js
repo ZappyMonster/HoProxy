@@ -1119,6 +1119,7 @@ export class HopGPTToAnthropicTransformer {
     this.currentBlockIndex = -1;  // Will be incremented when blocks start
     this.currentBlockType = null; // 'thinking', 'text', or 'tool_use'
     this.blockStarted = false;    // Track if current block has started
+    this.hasEmittedNonThinkingContent = false;
 
     // Accumulated content for non-streaming responses
     this.contentBlocks = [];      // Array of {type, content, signature?}
@@ -1195,6 +1196,14 @@ export class HopGPTToAnthropicTransformer {
 
     // Event type 1: Initial message created
     if (data.created && data.message) {
+      const createdMessageId = data.message?.messageId || data.message?.id;
+      if (createdMessageId && !this.responseMessageId) {
+        this.responseMessageId = createdMessageId;
+      }
+      const createdConversationId = data.message?.conversationId || data.conversation?.conversationId;
+      if (createdConversationId && !this.conversationId) {
+        this.conversationId = createdConversationId;
+      }
       return this._createMessageStart();
     }
 
@@ -1238,8 +1247,14 @@ export class HopGPTToAnthropicTransformer {
 
     // Event type 4: final - end of stream
     if (data.final) {
-      this.conversationId = data.conversation?.conversationId;
-      this.responseMessageId = data.responseMessage?.messageId;
+      const finalConversationId = data.conversation?.conversationId;
+      if (finalConversationId) {
+        this.conversationId = finalConversationId;
+      }
+      const finalMessageId = data.responseMessage?.messageId;
+      if (finalMessageId) {
+        this.responseMessageId = finalMessageId;
+      }
       this.inputTokens = data.responseMessage?.promptTokens || 0;
       this.outputTokens = data.responseMessage?.tokenCount || 0;
       this.hopGPTStopReason = data.responseMessage?.stopReason ??
@@ -1258,15 +1273,30 @@ export class HopGPTToAnthropicTransformer {
       }
 
       // Extract content blocks from final message for non-streaming
-      if (data.responseMessage?.content) {
-        this._extractFinalContent(data.responseMessage.content);
+      const finalContent = this._normalizeFinalContent(data.responseMessage);
+      if (finalContent) {
+        this._extractFinalContent(finalContent);
       }
 
       if (this._hasEmittedMessageStop) {
         return null;
       }
 
-      return this._createMessageStop();
+      const events = [];
+      if (finalContent && finalContent.length > 0 && !this.hasEmittedNonThinkingContent) {
+        this.mcpToolCallBuffer = '';
+        const finalEvents = this._emitFinalContentBlocks(finalContent);
+        if (finalEvents.length > 0) {
+          events.push(...finalEvents);
+        }
+      }
+
+      const stopEvents = this._createMessageStop();
+      if (stopEvents) {
+        events.push(...stopEvents);
+      }
+
+      return events.length > 0 ? events : null;
     }
 
     return null;
@@ -1471,12 +1501,80 @@ export class HopGPTToAnthropicTransformer {
     }
   }
 
+  _emitFinalContentBlocks(content) {
+    if (!Array.isArray(content) || content.length === 0) {
+      return [];
+    }
+
+    const events = [];
+    let stopAfterTool = false;
+
+    for (const block of content) {
+      if (stopAfterTool) {
+        break;
+      }
+
+      if (block.type === 'thinking' && block.thinking) {
+        const blockEvents = this._processContentBlock(block);
+        if (blockEvents) {
+          events.push(...blockEvents);
+        }
+        continue;
+      }
+
+      if (block.type === 'text') {
+        if (this.mcpPassthrough) {
+          if (block.text) {
+            events.push(...this._emitTextDelta(block.text));
+          }
+          continue;
+        }
+
+        const segments = splitMcpToolCalls(block.text || '');
+        for (const segment of segments) {
+          if (stopAfterTool) {
+            break;
+          }
+          if (segment.type === 'text') {
+            if (segment.text) {
+              events.push(...this._emitTextDelta(segment.text));
+            }
+            continue;
+          }
+          if (segment.type === 'tool_call') {
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (toolBlock) {
+              events.push(...this._processToolUseBlock(toolBlock));
+            }
+            if (this.stopOnToolUse) {
+              stopAfterTool = true;
+            }
+          }
+        }
+        continue;
+      }
+
+      if (block.type === 'tool_use') {
+        const blockEvents = this._processToolUseBlock(block);
+        if (blockEvents) {
+          events.push(...blockEvents);
+        }
+        if (this.stopOnToolUse) {
+          stopAfterTool = true;
+        }
+      }
+    }
+
+    return events;
+  }
+
   _emitTextDelta(text) {
     if (!text) {
       return [];
     }
 
     const events = [];
+    this.hasEmittedNonThinkingContent = true;
 
     if (this.blockStarted && this.currentBlockType !== 'text') {
       // Save tool use before switching away from tool_use block
@@ -1515,6 +1613,7 @@ export class HopGPTToAnthropicTransformer {
   _processToolUseBlock(block) {
     const events = [];
     this.hasToolUse = true;
+    this.hasEmittedNonThinkingContent = true;
     if (this.stopOnToolUse) {
       this._stopRequested = true;
     }
@@ -1756,6 +1855,7 @@ export class HopGPTToAnthropicTransformer {
   _createContentDelta(text) {
     // Legacy method for backward compatibility
     const events = [];
+    this.hasEmittedNonThinkingContent = true;
 
     // Ensure message and text block have started
     if (!this.hasStarted) {
@@ -1794,6 +1894,13 @@ export class HopGPTToAnthropicTransformer {
     // Mark that we're emitting message_stop
     this._hasEmittedMessageStop = true;
     this._suppressOutput = true;
+
+    if (!this.hasStarted) {
+      const startEvents = this._createMessageStart();
+      if (startEvents) {
+        events.push(...startEvents);
+      }
+    }
 
     // Flush any remaining buffered MCP tool calls
     if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
@@ -1847,6 +1954,22 @@ export class HopGPTToAnthropicTransformer {
     });
 
     return events;
+  }
+
+  _normalizeFinalContent(responseMessage) {
+    if (!responseMessage || typeof responseMessage !== 'object') {
+      return null;
+    }
+    if (Array.isArray(responseMessage.content)) {
+      return responseMessage.content;
+    }
+    if (typeof responseMessage.content === 'string' && responseMessage.content.trim().length > 0) {
+      return [{ type: 'text', text: responseMessage.content }];
+    }
+    if (typeof responseMessage.text === 'string' && responseMessage.text.trim().length > 0) {
+      return [{ type: 'text', text: responseMessage.text }];
+    }
+    return null;
   }
 
   _lookupToolName(candidate) {

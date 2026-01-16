@@ -17,6 +17,23 @@ describe('hopGPTToAnthropic transformer', () => {
     );
   });
 
+  it('captures created message id for conversation state', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    transformer.transformEvent({
+      event: 'message',
+      data: JSON.stringify({
+        created: true,
+        message: { id: 'msg-create' }
+      })
+    });
+
+    const state = transformer.getConversationState();
+    expect(state.lastAssistantMessageId).toBe('msg-create');
+  });
+
   it('transforms streaming thinking, text, and tool_use blocks', async () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: true,
@@ -588,6 +605,114 @@ describe('hopGPTToAnthropic transformer', () => {
       task: 'Explore the codebase',
       agent: 'codebase_explorer'
     });
+    expect(response.stop_reason).toBe('tool_use');
+  });
+
+  it('emits tool_use from final content when no deltas are streamed', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolCall = `<tool_call>
+{"name": "Task", "parameters": {"task": "Explore the codebase", "agent": "explorer"}}
+</tool_call>`;
+
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: [
+          { type: 'text', text: toolCall }
+        ]
+      }
+    });
+
+    const eventNames = events.map(evt => evt.event);
+    expect(eventNames).toContain('message_start');
+    expect(eventNames).toContain('content_block_start');
+    expect(eventNames).toContain('message_stop');
+
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStart).toBeTruthy();
+    expect(toolStart.data.content_block.name).toBe('Task');
+
+    const textDeltas = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+    expect(textDeltas).not.toContain('<tool_call>');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Task');
+    expect(response.stop_reason).toBe('tool_use');
+  });
+
+  it('emits tool_use from final text when content is a string', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolCall = `<tool_call>
+{"name": "Task", "parameters": {"task": "Explore the codebase", "agent": "explorer"}}
+</tool_call>`;
+
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: toolCall
+      }
+    });
+
+    const eventNames = events.map(evt => evt.event);
+    expect(eventNames).toContain('message_start');
+    expect(eventNames).toContain('content_block_start');
+    expect(eventNames).toContain('message_stop');
+
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStart).toBeTruthy();
+    expect(toolStart.data.content_block.name).toBe('Task');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Task');
     expect(response.stop_reason).toBe('tool_use');
   });
 
