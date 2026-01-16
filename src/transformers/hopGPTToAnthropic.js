@@ -1026,6 +1026,11 @@ export class HopGPTToAnthropicTransformer {
     // directly from the text stream.
     this.mcpPassthrough = options.mcpPassthrough ?? false;
 
+    // Stop streaming once a tool_use is emitted (Anthropic tool-use behavior).
+    this.stopOnToolUse = options.stopOnToolUse ?? false;
+    this._stopRequested = false;
+    this._suppressOutput = false;
+
     this.maxTokens = normalizeMaxTokens(options.maxTokens);
     this.stopSequences = normalizeStopSequences(options.stopSequences);
     this.hopGPTStopReason = null;
@@ -1040,7 +1045,12 @@ export class HopGPTToAnthropicTransformer {
   transformEvent(event) {
     try {
       const data = JSON.parse(event.data);
-      return this._transformData(data);
+      const suppressOutput = this._suppressOutput;
+      const events = this._transformData(data);
+      if (suppressOutput) {
+        return null;
+      }
+      return events;
     } catch (error) {
       log.error('Failed to parse SSE event', { error: error.message });
       return null;
@@ -1081,6 +1091,14 @@ export class HopGPTToAnthropicTransformer {
           cacheThinkingSignature(this.thinkingSignature, 'claude');
         }
 
+        if (this.stopOnToolUse && this._stopRequested && !this._hasEmittedMessageStop) {
+          this.mcpToolCallBuffer = '';
+          const stopEvents = this._createMessageStop();
+          if (stopEvents) {
+            events.push(...stopEvents);
+          }
+        }
+
         return events.length > 0 ? events : null;
       }
       return null;
@@ -1110,6 +1128,10 @@ export class HopGPTToAnthropicTransformer {
       // Extract content blocks from final message for non-streaming
       if (data.responseMessage?.content) {
         this._extractFinalContent(data.responseMessage.content);
+      }
+
+      if (this._hasEmittedMessageStop) {
+        return null;
       }
 
       return this._createMessageStop();
@@ -1211,6 +1233,9 @@ export class HopGPTToAnthropicTransformer {
             input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments)
           };
           events.push(...this._processToolUseBlock(toolBlock));
+          if (this.stopOnToolUse) {
+            break;
+          }
         }
       }
 
@@ -1232,7 +1257,11 @@ export class HopGPTToAnthropicTransformer {
    * Extract content blocks from final message
    */
   _extractFinalContent(content) {
+    let stopAfterTool = false;
     for (const block of content) {
+      if (stopAfterTool) {
+        break;
+      }
       if (block.type === 'thinking') {
         if (block.signature) {
           cacheThinkingSignature(block.signature, 'claude');
@@ -1257,6 +1286,9 @@ export class HopGPTToAnthropicTransformer {
 
         const segments = splitMcpToolCalls(block.text || '');
         for (const segment of segments) {
+          if (stopAfterTool) {
+            break;
+          }
           if (segment.type === 'text') {
             if (!segment.text) continue;
             this.contentBlocks.push({
@@ -1274,6 +1306,9 @@ export class HopGPTToAnthropicTransformer {
               name: segment.toolCall.toolName,
               input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments || {})
             });
+            if (this.stopOnToolUse) {
+              stopAfterTool = true;
+            }
           }
         }
       } else if (block.type === 'tool_use') {
@@ -1296,6 +1331,9 @@ export class HopGPTToAnthropicTransformer {
           name: block.name || '',
           input: input || {}
         });
+        if (this.stopOnToolUse) {
+          stopAfterTool = true;
+        }
       }
     }
   }
@@ -1344,6 +1382,9 @@ export class HopGPTToAnthropicTransformer {
   _processToolUseBlock(block) {
     const events = [];
     this.hasToolUse = true;
+    if (this.stopOnToolUse) {
+      this._stopRequested = true;
+    }
 
     const toolId = block.id || (this.currentToolUse?.id);
     const toolName = block.name || (this.currentToolUse?.name);
@@ -1619,6 +1660,7 @@ export class HopGPTToAnthropicTransformer {
 
     // Mark that we're emitting message_stop
     this._hasEmittedMessageStop = true;
+    this._suppressOutput = true;
 
     // Flush any remaining buffered MCP tool calls
     if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
