@@ -5,6 +5,68 @@ import { loggers } from '../utils/logger.js';
 
 const log = loggers.transform;
 
+function resolveDisableParallelToolUse(toolChoice) {
+  if (!toolChoice || typeof toolChoice !== "object") {
+    return false;
+  }
+  return toolChoice.disable_parallel_tool_use === true ||
+    toolChoice.disableParallelToolUse === true;
+}
+
+export function getToolChoiceConfig(toolChoice) {
+  const config = {
+    mustUseTool: false,
+    forcedToolName: null,
+    allowTools: true,
+    disableParallelToolUse: resolveDisableParallelToolUse(toolChoice)
+  };
+
+  if (!toolChoice) {
+    return config;
+  }
+
+  if (typeof toolChoice === "string") {
+    if (toolChoice === "none") {
+      config.allowTools = false;
+    }
+    if (toolChoice === "any" || toolChoice === "required") {
+      config.mustUseTool = true;
+    }
+    return config;
+  }
+
+  if (typeof toolChoice === "object") {
+    if (toolChoice.type === "none") {
+      config.allowTools = false;
+      return config;
+    }
+    if (toolChoice.type === "any") {
+      config.mustUseTool = true;
+      return config;
+    }
+    if (toolChoice.type === "tool" && toolChoice.name) {
+      config.mustUseTool = true;
+      config.forcedToolName = toolChoice.name;
+      return config;
+    }
+    if (toolChoice.type === "function" && toolChoice.function?.name) {
+      config.mustUseTool = true;
+      config.forcedToolName = toolChoice.function.name;
+      return config;
+    }
+    if (toolChoice.name) {
+      config.mustUseTool = true;
+      config.forcedToolName = toolChoice.name;
+    } else if (toolChoice.function?.name) {
+      config.mustUseTool = true;
+      config.forcedToolName = toolChoice.function.name;
+    }
+    return config;
+  }
+
+  return config;
+}
+
 /**
  * Build a tool injection prompt that tells the model about available tools
  * and how to call them using XML format that we can parse.
@@ -17,7 +79,17 @@ function buildToolInjectionPrompt(tools, toolChoice) {
     return '';
   }
 
-  let prompt = `\n\n# Available Tools\n\nYou have access to the following tools. To use a tool, output a tool call in the following XML format:\n\n<tool_call>\n{"name": "tool_name", "parameters": {"param1": "value1", "param2": "value2"}}\n</tool_call>\n\nIMPORTANT: You MUST use this exact XML format to call tools. Output ONLY the <tool_call> block directly in your response - do not describe what you will do and do not add any extra text.\n\n## Tool Definitions\n\n`;
+  const toolChoiceConfig = getToolChoiceConfig(toolChoice);
+
+  let prompt = `\n\n# Available Tools\n\nYou have access to the following tools. To use a tool, output a tool call in the following XML format:\n\n<tool_call>\n{"name": "tool_name", "parameters": {"param1": "value1", "param2": "value2"}}\n</tool_call>\n\nIMPORTANT: You MUST use this exact XML format to call tools.\n`;
+
+  if (toolChoiceConfig.allowTools === false) {
+    prompt += `Tool use is disabled for this response. Do not call any tools.\n`;
+  } else {
+    prompt += `If you call tools, respond with ONLY the <tool_call> block(s) and no extra text. If you are not calling a tool, respond normally without any <tool_call> blocks.\n`;
+  }
+
+  prompt += `\n## Tool Definitions\n\n`;
 
   for (const tool of tools) {
     const schema = tool.input_schema || tool.parameters || { type: 'object', properties: {} };
@@ -50,16 +122,20 @@ function buildToolInjectionPrompt(tools, toolChoice) {
   }
 
   // Add tool choice guidance
-  if (toolChoice) {
-    if (toolChoice.type === 'any' || toolChoice === 'any') {
-      prompt += `\nYou MUST use at least one tool in your response.\n`;
-    } else if ((toolChoice.type === 'tool' || toolChoice.type === 'function') && (toolChoice.name || toolChoice.function?.name)) {
-      const forcedName = toolChoice.name || toolChoice.function?.name;
-      prompt += `\nYou MUST use the "${forcedName}" tool in your response.\n`;
-    }
+  if (toolChoiceConfig.forcedToolName) {
+    prompt += `\nYou MUST use the "${toolChoiceConfig.forcedToolName}" tool in your response.\n`;
+  } else if (toolChoiceConfig.mustUseTool) {
+    prompt += `\nYou MUST use at least one tool in your response.\n`;
   }
 
-  prompt += `\nWhen you need to perform an action, call the appropriate tool using the XML format shown above. Call one tool per response. After calling a tool, wait for the result before proceeding.\n`;
+  if (toolChoiceConfig.allowTools !== false) {
+    prompt += `\nIf you need more information to call a tool, ask a brief clarifying question instead of guessing.\n`;
+    if (toolChoiceConfig.disableParallelToolUse) {
+      prompt += `Call at most one tool per response. After calling a tool, wait for the result before proceeding.\n`;
+    } else {
+      prompt += `You may call multiple tools in one response when they can run in parallel by outputting multiple <tool_call> blocks back-to-back. After calling tool(s), wait for the result(s) before proceeding.\n`;
+    }
+  }
 
   return prompt;
 }
@@ -420,35 +496,42 @@ export function transformToolChoice(toolChoice) {
     return null;
   }
 
+  const toolChoiceConfig = getToolChoiceConfig(toolChoice);
+  const applyDisableParallel = (value) => (
+    toolChoiceConfig.disableParallelToolUse
+      ? { ...value, disable_parallel_tool_use: true }
+      : value
+  );
+
   // Handle string shortcuts
   if (typeof toolChoice === "string") {
     if (toolChoice === "auto") {
-      return { type: "auto" };
+      return applyDisableParallel({ type: "auto" });
     }
     if (toolChoice === "any") {
-      return { type: "required" };
+      return applyDisableParallel({ type: "required" });
     }
     if (toolChoice === "required") {
-      return { type: "required" };
+      return applyDisableParallel({ type: "required" });
     }
     if (toolChoice === "none") {
-      return { type: "none" };
+      return applyDisableParallel({ type: "none" });
     }
   }
 
   // Handle object format
   if (typeof toolChoice === "object") {
     if (toolChoice.type === "auto") {
-      return { type: "auto" };
+      return applyDisableParallel({ type: "auto" });
     }
     if (toolChoice.type === "any") {
-      return { type: "required" };
+      return applyDisableParallel({ type: "required" });
     }
     if (toolChoice.type === "tool") {
-      return { type: "function", function: { name: toolChoice.name } };
+      return applyDisableParallel({ type: "function", function: { name: toolChoice.name } });
     }
     if (toolChoice.type === "function" && toolChoice.function?.name) {
-      return { type: "function", function: { name: toolChoice.function.name } };
+      return applyDisableParallel({ type: "function", function: { name: toolChoice.function.name } });
     }
   }
 

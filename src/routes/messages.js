@@ -1,5 +1,10 @@
 import { Router } from 'express';
-import { transformAnthropicToHopGPT, extractThinkingConfig, normalizeSystemPrompt } from '../transformers/anthropicToHopGPT.js';
+import {
+  transformAnthropicToHopGPT,
+  extractThinkingConfig,
+  normalizeSystemPrompt,
+  getToolChoiceConfig
+} from '../transformers/anthropicToHopGPT.js';
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
 import {
@@ -130,13 +135,18 @@ router.post('/messages', async (req, res) => {
         .map((name) => name.trim())
       : [];
     const hasTools = toolNames.length > 0;
-    const stopOnToolUse = !mcpPassthrough && hasTools;
+    const toolChoiceConfig = getToolChoiceConfig(anthropicRequest.tool_choice);
+    const stopOnToolUse = !mcpPassthrough &&
+      hasTools &&
+      toolChoiceConfig.allowTools !== false &&
+      toolChoiceConfig.disableParallelToolUse;
 
     log.debug('Processing request', {
       sessionId: sessionId.slice(0, 8) + '...',
       mcpPassthrough,
       thinkingEnabled: thinkingConfig.enabled,
       hasTools,
+      disableParallelToolUse: toolChoiceConfig.disableParallelToolUse,
       stopOnToolUse
     });
 
