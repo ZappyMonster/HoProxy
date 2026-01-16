@@ -17,7 +17,7 @@ function buildToolInjectionPrompt(tools, toolChoice) {
     return '';
   }
 
-  let prompt = `\n\n# Available Tools\n\nYou have access to the following tools. To use a tool, output a tool call in the following XML format:\n\n<tool_call>\n{"name": "tool_name", "parameters": {"param1": "value1", "param2": "value2"}}\n</tool_call>\n\nIMPORTANT: You MUST use this exact XML format to call tools. Output the <tool_call> block directly in your response - do not describe what you will do, actually call the tool.\n\n## Tool Definitions\n\n`;
+  let prompt = `\n\n# Available Tools\n\nYou have access to the following tools. To use a tool, output a tool call in the following XML format:\n\n<tool_call>\n{"name": "tool_name", "parameters": {"param1": "value1", "param2": "value2"}}\n</tool_call>\n\nIMPORTANT: You MUST use this exact XML format to call tools. Output ONLY the <tool_call> block directly in your response - do not describe what you will do and do not add any extra text.\n\n## Tool Definitions\n\n`;
 
   for (const tool of tools) {
     const schema = tool.input_schema || tool.parameters || { type: 'object', properties: {} };
@@ -59,7 +59,7 @@ function buildToolInjectionPrompt(tools, toolChoice) {
     }
   }
 
-  prompt += `\nWhen you need to perform an action, call the appropriate tool using the XML format shown above. You can call multiple tools if needed. After calling a tool, wait for the result before proceeding.\n`;
+  prompt += `\nWhen you need to perform an action, call the appropriate tool using the XML format shown above. Call one tool per response. After calling a tool, wait for the result before proceeding.\n`;
 
   return prompt;
 }

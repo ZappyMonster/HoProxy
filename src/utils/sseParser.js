@@ -43,7 +43,8 @@ export async function parseSSEStream(response, onEvent) {
  * @param {AbortSignal} [signal] - Optional abort signal to cancel streaming
  * @returns {Promise<object>} Final transformer state
  */
-export async function pipeSSEStream(fetchResponse, res, transformEvent, signal) {
+export async function pipeSSEStream(fetchResponse, res, transformEvent, signal, options = {}) {
+  const { autoEndOnMessageStop = false } = options;
   const parser = createParser((event) => {
     if (event.type === 'event') {
       const parsedEvent = {
@@ -74,6 +75,9 @@ export async function pipeSSEStream(fetchResponse, res, transformEvent, signal) 
           res.write(`data: ${JSON.stringify(evt.data)}\n\n`);
           if (typeof res.flush === 'function') {
             res.flush();
+          }
+          if (autoEndOnMessageStop && evt.event === 'message_stop' && !res.writableEnded && !res.destroyed) {
+            res.end();
           }
         }
       }

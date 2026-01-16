@@ -123,11 +123,15 @@ router.post('/messages', async (req, res) => {
       anthropicRequest.metadata?.mcp_passthrough === true ||
       anthropicRequest.metadata?.mcpPassthrough === true;
 
+    const hasTools = (anthropicRequest.tools?.length || 0) > 0;
+    const stopOnToolUse = !mcpPassthrough && hasTools;
+
     log.debug('Processing request', {
       sessionId: sessionId.slice(0, 8) + '...',
       mcpPassthrough,
       thinkingEnabled: thinkingConfig.enabled,
-      hasTools: (anthropicRequest.tools?.length || 0) > 0
+      hasTools,
+      stopOnToolUse
     });
 
     const transformerOptions = {
@@ -135,7 +139,8 @@ router.post('/messages', async (req, res) => {
       maxTokens: hopGPTRequest.max_tokens,
       stopSequences: hopGPTRequest.stop_sequences,
       systemPrompt,
-      mcpPassthrough
+      mcpPassthrough,
+      stopOnToolUse
     };
 
     // Determine if streaming
@@ -201,7 +206,7 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
 
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
-    }, abortController.signal);
+    }, abortController.signal, { autoEndOnMessageStop: true });
 
     // Ensure the stream is properly terminated even if HopGPT didn't send a final event
     // This prevents clients from hanging indefinitely waiting for message_stop
