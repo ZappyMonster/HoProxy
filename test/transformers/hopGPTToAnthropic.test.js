@@ -1651,4 +1651,116 @@ line3"}}
     const toolBlock = response.content.find(block => block.type === 'tool_use');
     expect(toolBlock.input).toEqual({ _raw: invalidInput });
   });
+
+  it('strips tool instruction leaks and role prefixes from final text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const leakedText = [
+      'H: user prompt',
+      '',
+      '# Available Tools',
+      '',
+      'You have access to the following tools. To use a tool, output a tool call in the following XML format:',
+      '',
+      '<tool_call>',
+      '{"name": "tool_name", "parameters": {}}',
+      '</tool_call>',
+      '',
+      '## Tool Definitions',
+      '',
+      '### search',
+      'Parameters:',
+      '- q [string]',
+      '',
+      'A: assistant answer'
+    ].join('\n');
+
+    transformer.transformEvent({
+      event: 'message',
+      data: JSON.stringify({
+        final: true,
+        responseMessage: {
+          messageId: 'msg-final',
+          promptTokens: 0,
+          tokenCount: 0,
+          stopReason: 'stop',
+          content: [{ type: 'text', text: leakedText }]
+        }
+      })
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const textBlock = response.content.find(block => block.type === 'text');
+    expect(textBlock.text).toContain('user prompt');
+    expect(textBlock.text).toContain('assistant answer');
+    expect(textBlock.text).not.toContain('# Available Tools');
+    expect(textBlock.text).not.toContain('Tool Definitions');
+    expect(textBlock.text).not.toContain('<tool_call>');
+    expect(textBlock.text).not.toMatch(/\bH:\s/);
+    expect(textBlock.text).not.toMatch(/\bA:\s/);
+  });
+
+  it('filters tool instruction leaks and role markers in streaming text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: 'H: user prompt\n\n# Available Tools\n' }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: '<tool_call>{"name":"tool_name","parameters":{}}</tool_call>\n\nA: streamed answer' }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const text = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+
+    expect(text).toContain('user prompt');
+    expect(text).toContain('streamed answer');
+    expect(text).not.toContain('# Available Tools');
+    expect(text).not.toContain('Tool Definitions');
+    expect(text).not.toContain('<tool_call>');
+    expect(text).not.toMatch(/\bH:\s/);
+    expect(text).not.toMatch(/\bA:\s/);
+  });
 });
