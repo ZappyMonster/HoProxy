@@ -123,7 +123,13 @@ router.post('/messages', async (req, res) => {
       anthropicRequest.metadata?.mcp_passthrough === true ||
       anthropicRequest.metadata?.mcpPassthrough === true;
 
-    const hasTools = (anthropicRequest.tools?.length || 0) > 0;
+    const toolNames = Array.isArray(anthropicRequest.tools)
+      ? anthropicRequest.tools
+        .map((tool) => tool?.name || tool?.function?.name || tool?.custom?.name)
+        .filter((name) => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim())
+      : [];
+    const hasTools = toolNames.length > 0;
     const stopOnToolUse = !mcpPassthrough && hasTools;
 
     log.debug('Processing request', {
@@ -140,7 +146,8 @@ router.post('/messages', async (req, res) => {
       stopSequences: hopGPTRequest.stop_sequences,
       systemPrompt,
       mcpPassthrough,
-      stopOnToolUse
+      stopOnToolUse,
+      toolNames
     };
 
     // Determine if streaming

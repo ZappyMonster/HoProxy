@@ -670,13 +670,10 @@ export function transformAnthropicToHopGPT(
   });
   
   const imageDetail = "high";
-  // NOTE: Do NOT use </tool_call> as stop sequence - it causes the model to stop after
-  // each individual tool call, forcing Claude Code to make many requests in a loop.
-  // Using a non-matching stop sequence (or none) allows the model to batch multiple
-  // tool calls in a single response, which is more efficient.
-  // The </mcp_tool_call> sequence doesn't match the <tool_call> format we instruct,
-  // so it effectively allows multi-tool responses.
-  const toolCallStopSequence = "</mcp_tool_call>";
+  // NOTE: Do NOT use a stop sequence that matches tool call markup. Some backends
+  // strip stop sequences from output, which would truncate XML tool calls and
+  // break parsing. Use a sentinel that is unlikely to appear in model output.
+  const toolCallStopSequence = "<|hopgpt_tool_stop|>";
   const normalizedTools = normalizeToolDefinitions(tools);
 
   // Get thinking configuration

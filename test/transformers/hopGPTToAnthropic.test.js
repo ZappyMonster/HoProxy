@@ -177,6 +177,74 @@ describe('hopGPTToAnthropic transformer', () => {
     );
   });
 
+  it('maps mcp_tool_call blocks to matching MCP tool names', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false,
+      toolNames: ['mcp__opencode__Edit']
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const mcpCall = `<mcp_tool_call>
+<server_name>opencode</server_name>
+<tool_name>Edit</tool_name>
+<arguments>
+{
+  "file_path": "example.ts",
+  "new_string": "line 1\\nline 2\\nline 3"
+}
+</arguments>
+</mcp_tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: `Before ${mcpCall} After` }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use' &&
+      evt.data?.content_block?.name === 'mcp__opencode__Edit'
+    );
+    expect(toolStart).toBeTruthy();
+
+    const response = transformer.buildNonStreamingResponse();
+    expect(response.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'tool_use',
+          name: 'mcp__opencode__Edit'
+        })
+      ])
+    );
+  });
+
   it('handles mcp_tool_call blocks without arguments', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false

@@ -57,6 +57,16 @@ function includesAny(haystack, needles) {
   return needles.some(tag => haystack.includes(tag));
 }
 
+function normalizeToolNameToken(value) {
+  if (!value || typeof value !== 'string') {
+    return '';
+  }
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 function isLikelyToolTagStart(text, index, tagName) {
   if (index > 0) {
     const prev = text[index - 1];
@@ -895,9 +905,9 @@ function splitMcpToolCalls(text) {
 function splitStreamTextForMcpToolCalls(text) {
   const segments = [];
 
-  // Maximum buffer size before we give up waiting for a closing tag
-  // This prevents infinite buffering when text contains partial tag-like content
-  const MAX_BUFFER_SIZE = 8000;
+  // Maximum buffer size before we give up waiting for a closing tag.
+  // Keep this large enough for file-edit tool calls while still bounded.
+  const MAX_BUFFER_SIZE = 200000;
 
   const { segments: parsedSegments, lastIndex } = extractToolCallSegments(text);
   segments.push(...parsedSegments);
@@ -1025,6 +1035,26 @@ export class HopGPTToAnthropicTransformer {
     // This is needed for clients like OpenCode that parse and execute tool calls
     // directly from the text stream.
     this.mcpPassthrough = options.mcpPassthrough ?? false;
+
+    this.availableToolNames = Array.isArray(options.toolNames)
+      ? options.toolNames
+        .filter((name) => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim())
+      : [];
+    this.availableToolNameSet = new Set(this.availableToolNames);
+    this.availableToolNameLowerMap = new Map();
+    this.availableToolNamesNormalized = [];
+    for (const name of this.availableToolNames) {
+      const lower = name.toLowerCase();
+      if (!this.availableToolNameLowerMap.has(lower)) {
+        this.availableToolNameLowerMap.set(lower, name);
+      }
+      this.availableToolNamesNormalized.push({
+        name,
+        normalized: normalizeToolNameToken(name)
+      });
+    }
+    this.genericMcpToolName = this._detectGenericMcpToolName();
 
     // Stop streaming once a tool_use is emitted (Anthropic tool-use behavior).
     this.stopOnToolUse = options.stopOnToolUse ?? false;
@@ -1226,13 +1256,10 @@ export class HopGPTToAnthropicTransformer {
           continue;
         }
         if (segment.type === 'tool_call') {
-          const toolBlock = {
-            type: 'tool_use',
-            id: segment.toolCall.toolUseId || generateToolUseId(),
-            name: segment.toolCall.toolName,
-            input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments)
-          };
-          events.push(...this._processToolUseBlock(toolBlock));
+          const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+          if (toolBlock) {
+            events.push(...this._processToolUseBlock(toolBlock));
+          }
           if (this.stopOnToolUse) {
             break;
           }
@@ -1300,11 +1327,15 @@ export class HopGPTToAnthropicTransformer {
           }
           if (segment.type === 'tool_call') {
             this.hasToolUse = true;
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (!toolBlock) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'tool_use',
-              id: segment.toolCall.toolUseId || generateToolUseId(),
-              name: segment.toolCall.toolName,
-              input: normalizeToolInput(segment.toolCall.toolName, segment.toolCall.arguments || {})
+              id: toolBlock.id,
+              name: toolBlock.name,
+              input: toolBlock.input
             });
             if (this.stopOnToolUse) {
               stopAfterTool = true;
@@ -1669,13 +1700,10 @@ export class HopGPTToAnthropicTransformer {
         if (segment.type === 'text' && segment.text) {
           events.push(...this._emitTextDelta(segment.text));
         } else if (segment.type === 'tool_call') {
-          const toolBlock = {
-            type: 'tool_use',
-            id: segment.toolCall.toolUseId || generateToolUseId(),
-            name: segment.toolCall.toolName,
-            input: segment.toolCall.arguments
-          };
-          events.push(...this._processToolUseBlock(toolBlock));
+          const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+          if (toolBlock) {
+            events.push(...this._processToolUseBlock(toolBlock));
+          }
         }
       }
       this.mcpToolCallBuffer = '';
@@ -1717,6 +1745,121 @@ export class HopGPTToAnthropicTransformer {
     });
 
     return events;
+  }
+
+  _lookupToolName(candidate) {
+    if (!candidate || this.availableToolNames.length === 0) {
+      return null;
+    }
+    if (this.availableToolNameSet.has(candidate)) {
+      return candidate;
+    }
+    const lower = candidate.toLowerCase();
+    return this.availableToolNameLowerMap.get(lower) || null;
+  }
+
+  _detectGenericMcpToolName() {
+    const candidates = [
+      'mcp',
+      'mcp_tool',
+      'mcp_tool_call',
+      'mcp_tool_use',
+      'mcp_call',
+      'mcp.call'
+    ];
+    for (const candidate of candidates) {
+      const match = this._lookupToolName(candidate);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  _resolveMcpToolName(serverName, toolName) {
+    if (!serverName || !toolName || this.availableToolNames.length === 0) {
+      return null;
+    }
+
+    const candidates = [
+      `${serverName}__${toolName}`,
+      `${serverName}_${toolName}`,
+      `${serverName}.${toolName}`,
+      `${serverName}/${toolName}`,
+      `${serverName}:${toolName}`,
+      `mcp__${serverName}__${toolName}`,
+      `mcp_${serverName}_${toolName}`,
+      `mcp-${serverName}-${toolName}`
+    ];
+
+    for (const candidate of candidates) {
+      const match = this._lookupToolName(candidate);
+      if (match) {
+        return match;
+      }
+    }
+
+    const normalizedServer = normalizeToolNameToken(serverName);
+    const normalizedTool = normalizeToolNameToken(toolName);
+    if (!normalizedServer || !normalizedTool) {
+      return null;
+    }
+
+    for (const entry of this.availableToolNamesNormalized) {
+      const serverIndex = entry.normalized.indexOf(normalizedServer);
+      if (serverIndex === -1) {
+        continue;
+      }
+      const toolIndex = entry.normalized.indexOf(normalizedTool);
+      if (toolIndex === -1 || toolIndex < serverIndex) {
+        continue;
+      }
+      return entry.name;
+    }
+
+    return null;
+  }
+
+  _resolveToolCall(toolCall) {
+    if (!toolCall) {
+      return null;
+    }
+
+    let resolvedName = toolCall.toolName || '';
+    let resolvedInput = toolCall.arguments;
+
+    if (toolCall.serverName) {
+      const matchedName = this._resolveMcpToolName(toolCall.serverName, toolCall.toolName);
+      if (matchedName) {
+        resolvedName = matchedName;
+      } else if (this.genericMcpToolName) {
+        resolvedName = this.genericMcpToolName;
+        resolvedInput = {
+          server_name: toolCall.serverName,
+          tool_name: toolCall.toolName,
+          arguments: resolvedInput ?? {}
+        };
+      }
+    }
+
+    return {
+      name: resolvedName,
+      input: resolvedInput,
+      toolUseId: toolCall.toolUseId || null
+    };
+  }
+
+  _buildToolUseFromCall(toolCall) {
+    const resolved = this._resolveToolCall(toolCall);
+    if (!resolved || !resolved.name) {
+      return null;
+    }
+    return {
+      type: 'tool_use',
+      id: resolved.toolUseId || generateToolUseId(),
+      name: resolved.name,
+      input: normalizeToolInput(resolved.name, resolved.input)
+    };
   }
 
   /**
