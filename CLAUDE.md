@@ -34,9 +34,11 @@ Anthropic SDK Client
         ▼
 ┌─────────────────────────────────────────┐
 │  Routes (src/routes/)                   │
+│  • index.js - Route wiring, /health     │
 │  • messages.js - /v1/messages           │
-│  • models.js - /v1/models               │
-│  • refreshToken.js - /refresh-token     │
+│  • models.js - /v1/models, /v1/models/:id │
+│  • refreshToken.js - /refresh-token,   │
+│    /token-status                        │
 └─────────────────┬───────────────────────┘
                   ▼
 ┌─────────────────────────────────────────┐
@@ -79,7 +81,9 @@ Anthropic SDK Client
 - `<function_calls><invoke name="...">` - Claude Code / OpenCode format
 - `<tool_call>{JSON}</tool_call>` - JSON format
 
-**Session Management**: Uses `X-Session-Id` header or `metadata.session_id` to maintain conversation threading via `parentMessageId`.
+**Session Management**: Uses `X-Session-Id` header (or `X-SessionID`) or `metadata.session_id`/`metadata.conversation_id` to maintain conversation threading via `parentMessageId`. Reset sessions with `X-Conversation-Reset: true` header or `metadata.conversation_reset`/`metadata.reset`/`metadata.new_conversation` set to `true`.
+
+**MCP Passthrough**: Enable with `x-mcp-passthrough: true` header or `metadata.mcp_passthrough: true` to keep tool call XML in the text response instead of converting to `tool_use` blocks. Use for clients that parse XML directly.
 
 **Model Aliases**: Flexible naming via `modelMapping.js`. Supports opus-4.5, sonnet-4.5, and haiku-4.5 with automatic `-thinking` suffix handling and version variants (e.g., `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4-5-thinking` all resolve correctly).
 

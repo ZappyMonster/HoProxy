@@ -54,9 +54,77 @@ const TOOL_TAG_CLOSINGS = {
 };
 
 const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+const TOOL_INSTRUCTION_MARKERS = [
+  '# available tools',
+  '## tool definitions',
+  'you have access to the following tools',
+  'important: you must use this exact xml format to call tools'
+];
+const SANITIZE_TAIL_LENGTH = 120;
+const ROLE_PREFIX_RE = /(^|\r?\n)\s*(?:H:|A:|Human:|Assistant:)\s*/g;
 
 function includesAny(haystack, needles) {
   return needles.some(tag => haystack.includes(tag));
+}
+
+function findToolInstructionStartIndex(text, fromIndex = 0) {
+  if (!text) {
+    return -1;
+  }
+  const lower = text.toLowerCase();
+  let earliest = -1;
+  for (const marker of TOOL_INSTRUCTION_MARKERS) {
+    const idx = lower.indexOf(marker, fromIndex);
+    if (idx !== -1 && (earliest === -1 || idx < earliest)) {
+      earliest = idx;
+    }
+  }
+  return earliest;
+}
+
+function findNextAssistantMarkerIndex(text, fromIndex = 0) {
+  if (!text) {
+    return -1;
+  }
+  const re = /(^|\r?\n)\s*(?:A:|Assistant:)\s*/g;
+  re.lastIndex = fromIndex;
+  const match = re.exec(text);
+  return match ? match.index : -1;
+}
+
+function stripRolePrefixes(text) {
+  if (!text) {
+    return text;
+  }
+  return text.replace(ROLE_PREFIX_RE, '$1');
+}
+
+function stripToolInstructionLeak(text) {
+  if (!text) {
+    return text;
+  }
+
+  let result = text;
+  while (true) {
+    const startIndex = findToolInstructionStartIndex(result, 0);
+    if (startIndex === -1) {
+      break;
+    }
+
+    const assistantIndex = findNextAssistantMarkerIndex(result, startIndex);
+    if (assistantIndex === -1) {
+      result = result.slice(0, startIndex);
+      break;
+    }
+
+    result = result.slice(0, startIndex) + result.slice(assistantIndex);
+  }
+
+  return result;
+}
+
+function sanitizeTextFull(text) {
+  return stripRolePrefixes(stripToolInstructionLeak(text));
 }
 
 function normalizeToolNameToken(value) {
@@ -1164,6 +1232,9 @@ export class HopGPTToAnthropicTransformer {
     this._stopRequested = false;
     this._suppressOutput = false;
 
+    this._textSanitizeBuffer = '';
+    this._toolLeakActive = false;
+
     this.maxTokens = normalizeMaxTokens(options.maxTokens);
     this.stopSequences = normalizeStopSequences(options.stopSequences);
     this.hopGPTStopReason = null;
@@ -1302,6 +1373,87 @@ export class HopGPTToAnthropicTransformer {
     return null;
   }
 
+  _sanitizeTextChunk(text) {
+    if (!text) {
+      return '';
+    }
+
+    let source = `${this._textSanitizeBuffer}${text}`;
+    this._textSanitizeBuffer = '';
+    let output = '';
+
+    let processing = source;
+    let processLimit = processing.length;
+    if (!this._toolLeakActive && processing.length > SANITIZE_TAIL_LENGTH) {
+      processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+    }
+
+    while (processing.length > 0) {
+      if (this._toolLeakActive) {
+        const assistantIndex = findNextAssistantMarkerIndex(processing, 0);
+        if (assistantIndex === -1) {
+          this._textSanitizeBuffer = processing.slice(-SANITIZE_TAIL_LENGTH);
+          return stripRolePrefixes(output);
+        }
+        processing = processing.slice(assistantIndex);
+        this._toolLeakActive = false;
+        processLimit = processing.length;
+        if (processing.length > SANITIZE_TAIL_LENGTH) {
+          processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+        }
+        continue;
+      }
+
+      const startIndex = findToolInstructionStartIndex(processing, 0);
+      if (startIndex === -1 || startIndex >= processLimit) {
+        output += processing.slice(0, processLimit);
+        processing = processing.slice(processLimit);
+        break;
+      }
+
+      output += processing.slice(0, startIndex);
+      const assistantIndex = findNextAssistantMarkerIndex(processing, startIndex);
+      if (assistantIndex === -1) {
+        this._toolLeakActive = true;
+        this._textSanitizeBuffer = processing.slice(startIndex);
+        return stripRolePrefixes(output);
+      }
+
+      processing = processing.slice(assistantIndex);
+      processLimit = processing.length;
+      if (processing.length > SANITIZE_TAIL_LENGTH) {
+        processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+      }
+    }
+
+    if (!this._toolLeakActive) {
+      this._textSanitizeBuffer = processing;
+    }
+
+    return stripRolePrefixes(output);
+  }
+
+  _flushSanitizedText() {
+    if (!this._textSanitizeBuffer) {
+      this._toolLeakActive = false;
+      return '';
+    }
+
+    let remaining = this._textSanitizeBuffer;
+    this._textSanitizeBuffer = '';
+
+    if (this._toolLeakActive) {
+      const assistantIndex = findNextAssistantMarkerIndex(remaining, 0);
+      this._toolLeakActive = false;
+      if (assistantIndex === -1) {
+        return '';
+      }
+      remaining = remaining.slice(assistantIndex);
+    }
+
+    return sanitizeTextFull(remaining);
+  }
+
   /**
    * Process a single content block from delta
    */
@@ -1346,25 +1498,30 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle text blocks
     if (block.type === 'text' && block.text) {
+      const sanitizedText = this._sanitizeTextChunk(block.text);
+      if (!sanitizedText) {
+        return events.length > 0 ? events : null;
+      }
+
       // In passthrough mode, don't parse MCP tool calls - just emit text as-is
       if (this.mcpPassthrough) {
-        events.push(...this._emitTextDelta(block.text));
+        events.push(...this._emitTextDelta(sanitizedText));
         return events.length > 0 ? events : null;
       }
 
       // Debug: Log incoming text for tool call detection
       if (process.env.HOPGPT_DEBUG === 'true') {
-        const hasToolCallTag = block.text.includes('<tool_call') ||
-                               includesAny(block.text, FUNCTION_CALLS_TAGS) ||
-                               block.text.includes(MCP_TOOL_CALL_START_TAG) ||
-                               block.text.includes(TOOL_USE_START_TAG) ||
-                               includesAny(block.text, INVOKE_TAGS);
+        const hasToolCallTag = sanitizedText.includes('<tool_call') ||
+                               includesAny(sanitizedText, FUNCTION_CALLS_TAGS) ||
+                               sanitizedText.includes(MCP_TOOL_CALL_START_TAG) ||
+                               sanitizedText.includes(TOOL_USE_START_TAG) ||
+                               includesAny(sanitizedText, INVOKE_TAGS);
         if (hasToolCallTag) {
-          console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
+          console.log('[Transform] Text contains tool call XML:', sanitizedText.slice(0, 200));
         }
       }
 
-      const combined = `${this.mcpToolCallBuffer}${block.text}`;
+      const combined = `${this.mcpToolCallBuffer}${sanitizedText}`;
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
 
@@ -1433,17 +1590,19 @@ export class HopGPTToAnthropicTransformer {
       } else if (block.type === 'text') {
         // In passthrough mode, don't parse MCP tool calls - preserve text as-is
         if (this.mcpPassthrough) {
-          if (block.text) {
+          const sanitizedText = sanitizeTextFull(block.text || '');
+          if (sanitizedText) {
             this.contentBlocks.push({
               type: 'text',
-              text: block.text
+              text: sanitizedText
             });
-            this.accumulatedText += block.text;
+            this.accumulatedText += sanitizedText;
           }
           continue;
         }
 
-        const segments = splitMcpToolCalls(block.text || '');
+        const sanitizedText = sanitizeTextFull(block.text || '');
+        const segments = splitMcpToolCalls(sanitizedText);
         for (const segment of segments) {
           if (stopAfterTool) {
             break;
@@ -1524,13 +1683,15 @@ export class HopGPTToAnthropicTransformer {
 
       if (block.type === 'text') {
         if (this.mcpPassthrough) {
-          if (block.text) {
-            events.push(...this._emitTextDelta(block.text));
+          const sanitizedText = sanitizeTextFull(block.text || '');
+          if (sanitizedText) {
+            events.push(...this._emitTextDelta(sanitizedText));
           }
           continue;
         }
 
-        const segments = splitMcpToolCalls(block.text || '');
+        const sanitizedText = sanitizeTextFull(block.text || '');
+        const segments = splitMcpToolCalls(sanitizedText);
         for (const segment of segments) {
           if (stopAfterTool) {
             break;
@@ -1899,6 +2060,27 @@ export class HopGPTToAnthropicTransformer {
       const startEvents = this._createMessageStart();
       if (startEvents) {
         events.push(...startEvents);
+      }
+    }
+
+    const flushedText = this._flushSanitizedText();
+    if (flushedText) {
+      if (this.mcpPassthrough) {
+        events.push(...this._emitTextDelta(flushedText));
+      } else {
+        const combined = `${this.mcpToolCallBuffer}${flushedText}`;
+        const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
+        this.mcpToolCallBuffer = remainder;
+        for (const segment of segments) {
+          if (segment.type === 'text' && segment.text) {
+            events.push(...this._emitTextDelta(segment.text));
+          } else if (segment.type === 'tool_call') {
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (toolBlock) {
+              events.push(...this._processToolUseBlock(toolBlock));
+            }
+          }
+        }
       }
     }
 
