@@ -519,11 +519,8 @@ function parseEmbeddedJson(value) {
     return value;
   }
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      return JSON.parse(trimmed);
-    } catch (error) {
-      return value;
-    }
+    const parsed = parseJsonWithRepair(trimmed);
+    return parsed !== null ? parsed : value;
   }
   return value;
 }
@@ -1037,8 +1034,14 @@ function parseToolUseBlock(block) {
 
   if (inputText && inputText.length > 0) {
     const trimmedInput = inputText.trim();
-    const repairedInput = parseJsonWithRepair(trimmedInput);
-    parsedArgs = repairedInput !== null ? repairedInput : trimmedInput;
+    let repairedInput = parseJsonWithRepair(trimmedInput);
+    if (repairedInput === null) {
+      const extracted = extractFirstJsonObject(trimmedInput);
+      if (extracted) {
+        repairedInput = parseJsonWithRepair(extracted);
+      }
+    }
+    parsedArgs = repairedInput !== null ? repairedInput : { _raw: trimmedInput };
   }
 
   return {
@@ -1140,8 +1143,14 @@ function parseIncompleteToolCallBlock(block) {
       let parsedArgs = {};
       if (inputText && inputText.trim().length > 0) {
         const trimmedInput = inputText.trim();
-        const repairedInput = parseJsonWithRepair(trimmedInput);
-        parsedArgs = repairedInput !== null ? repairedInput : trimmedInput;
+        let repairedInput = parseJsonWithRepair(trimmedInput);
+        if (repairedInput === null) {
+          const extracted = extractFirstJsonObject(trimmedInput);
+          if (extracted) {
+            repairedInput = parseJsonWithRepair(extracted);
+          }
+        }
+        parsedArgs = repairedInput !== null ? repairedInput : { _raw: trimmedInput };
       }
       return {
         serverName: null,
@@ -1217,8 +1226,10 @@ function splitStreamTextForMcpToolCalls(text) {
         segments.push({ type: 'tool_call', toolCall: incomplete });
         return { segments, remainder: '' };
       }
-      segments.push({ type: 'text', text: trailing });
-      return { segments, remainder: '' };
+      if (startIndex > 0) {
+        segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
+      }
+      return { segments, remainder: potentialRemainder };
     }
     if (startIndex > 0) {
       segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
@@ -1320,6 +1331,7 @@ export class HopGPTToAnthropicTransformer {
     this.accumulatedThinking = '';
     this.thinkingSignature = null;
     this.mcpToolCallBuffer = '';
+    this._toolBufferWarningEmitted = false;
 
     // Tool use support
     this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
@@ -1387,9 +1399,6 @@ export class HopGPTToAnthropicTransformer {
   }
 
   _transformData(data) {
-    // Debug logging to trace what HopGPT sends
-    log.debug('Processing HopGPT event', { eventType: data.event || (data.created ? 'created' : data.final ? 'final' : 'unknown') });
-
     // Event type 1: Initial message created
     if (data.created && data.message) {
       const createdMessageId = data.message?.messageId || data.message?.id;
@@ -1430,6 +1439,7 @@ export class HopGPTToAnthropicTransformer {
 
         if (this.stopOnToolUse && this._stopRequested && !this._hasEmittedMessageStop) {
           this.mcpToolCallBuffer = '';
+          this._toolBufferWarningEmitted = false;
           const stopEvents = this._createMessageStop();
           if (stopEvents) {
             events.push(...stopEvents);
@@ -1481,6 +1491,7 @@ export class HopGPTToAnthropicTransformer {
       const events = [];
       if (finalContent && finalContent.length > 0 && !this.hasEmittedNonThinkingContent) {
         this.mcpToolCallBuffer = '';
+        this._toolBufferWarningEmitted = false;
         const finalEvents = this._emitFinalContentBlocks(finalContent);
         if (finalEvents.length > 0) {
           events.push(...finalEvents);
@@ -1650,10 +1661,20 @@ export class HopGPTToAnthropicTransformer {
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
 
-      // Debug: Log buffer state when it grows large (potential infinite buffering issue)
+      if (!remainder) {
+        this._toolBufferWarningEmitted = false;
+      }
+
+      // Debug: Log buffer state once when it exceeds the threshold.
       if (process.env.HOPGPT_DEBUG === 'true') {
-        if (remainder && remainder.length > 500) {
-          console.log('[Transform] WARNING: Large buffer detected:', remainder.length, 'chars. First 200:', remainder.slice(0, 200));
+        if (remainder &&
+            remainder.length > MAX_TOOL_CALL_BUFFER_SIZE &&
+            !this._toolBufferWarningEmitted) {
+          this._toolBufferWarningEmitted = true;
+          log.debug('Tool call buffer exceeded threshold', {
+            size: remainder.length,
+            preview: remainder.slice(0, 200)
+          });
         }
         const toolCalls = segments.filter(s => s.type === 'tool_call');
         if (toolCalls.length > 0) {
@@ -1937,8 +1958,22 @@ export class HopGPTToAnthropicTransformer {
     if (block.input !== undefined) {
       let inputDelta = '';
       if (typeof block.input === 'string') {
-        inputDelta = block.input;
-        this.currentToolUse.inputJson += inputDelta;
+        const trimmedInput = block.input.trim();
+        let parsedInput = null;
+        if (trimmedInput) {
+          parsedInput = parseJsonWithRepair(trimmedInput);
+          if (parsedInput === null) {
+            const extracted = extractFirstJsonObject(trimmedInput);
+            if (extracted) {
+              parsedInput = parseJsonWithRepair(extracted);
+            }
+          }
+        }
+        const normalizedInput = parsedInput && typeof parsedInput === 'object'
+          ? normalizeToolInput(toolName, parsedInput)
+          : { _raw: block.input };
+        inputDelta = JSON.stringify(normalizedInput);
+        this.currentToolUse.inputJson = inputDelta;
       } else if (typeof block.input === 'object') {
         const normalizedInput = normalizeToolInput(toolName, block.input);
         inputDelta = JSON.stringify(normalizedInput);
@@ -2223,6 +2258,7 @@ export class HopGPTToAnthropicTransformer {
         }
       }
       this.mcpToolCallBuffer = '';
+      this._toolBufferWarningEmitted = false;
     }
 
     // Save current tool use if still in progress
@@ -2357,7 +2393,7 @@ export class HopGPTToAnthropicTransformer {
       return null;
     }
 
-    let resolvedName = toolCall.toolName || '';
+    let resolvedName = toolCall.toolName ? toolCall.toolName.trim() : '';
     let resolvedInput = toolCall.arguments;
 
     if (toolCall.serverName) {
@@ -2371,6 +2407,21 @@ export class HopGPTToAnthropicTransformer {
           tool_name: toolCall.toolName,
           arguments: resolvedInput ?? {}
         };
+      }
+    } else if (resolvedName) {
+      const matchedName = this._lookupToolName(resolvedName);
+      if (matchedName) {
+        resolvedName = matchedName;
+      } else if (this.availableToolNamesNormalized.length > 0) {
+        const normalizedCandidate = normalizeToolNameToken(resolvedName);
+        if (normalizedCandidate) {
+          const normalizedMatch = this.availableToolNamesNormalized.find(
+            (entry) => entry.normalized === normalizedCandidate
+          );
+          if (normalizedMatch) {
+            resolvedName = normalizedMatch.name;
+          }
+        }
       }
     }
 

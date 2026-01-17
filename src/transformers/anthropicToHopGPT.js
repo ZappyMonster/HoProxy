@@ -87,6 +87,9 @@ function buildToolInjectionPrompt(tools, toolChoice) {
     prompt += `Tool use is disabled for this response. Do not call any tools.\n`;
   } else {
     prompt += `If you call tools, respond with ONLY the <tool_call> block(s) and no extra text. If you are not calling a tool, respond normally without any <tool_call> blocks.\n`;
+    if (toolChoiceConfig.disableParallelToolUse) {
+      prompt += `Call at most one tool per response, then wait for tool results before calling another tool.\n`;
+    }
   }
 
   prompt += `\n## Tool Definitions\n\n`;
