@@ -608,6 +608,60 @@ describe('hopGPTToAnthropic transformer', () => {
     expect(response.stop_reason).toBe('tool_use');
   });
 
+  it('normalizes tool_call names to available tool definitions', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false,
+      toolNames: ['todowrite']
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const toolCall = `<tool_call>{"name": "todo_write", "parameters": {"todos": [{"id": "1", "content": "Task A", "status": "pending"}]}}</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: toolCall }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const toolStart = events.find(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolStart).toBeTruthy();
+    expect(toolStart.data.content_block.name).toBe('todowrite');
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('todowrite');
+  });
+
   it('emits tool_use from final content when no deltas are streamed', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
       thinkingEnabled: false
