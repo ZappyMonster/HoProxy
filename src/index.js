@@ -1,12 +1,108 @@
 #!/usr/bin/env node
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
 import messagesRouter from './routes/messages.js';
 import modelsRouter from './routes/models.js';
 import refreshTokenRouter from './routes/refreshToken.js';
 import { requestLoggerMiddleware, createLogger } from './utils/logger.js';
+import { getDefaultClient, getTokenExpiryInfo } from './services/hopgptClient.js';
 
 const log = createLogger('Server');
+
+/**
+ * Mask a token for safe logging (show first 10 and last 10 chars)
+ * @param {string} token - Token to mask
+ * @returns {string} Masked token
+ */
+function maskToken(token) {
+  if (!token) return '<not set>';
+  if (token.length <= 24) return '<too short to mask>';
+  return `${token.substring(0, 10)}...${token.substring(token.length - 10)}`;
+}
+
+/**
+ * Log startup token diagnostics to help debug auth issues
+ */
+function logStartupTokenDiagnostics() {
+  const client = getDefaultClient();
+  const envPath = path.join(process.cwd(), '.env');
+  
+  log.info('=== Token Diagnostics on Startup ===');
+  
+  // Check bearer token
+  const bearerToken = client.bearerToken;
+  const bearerInfo = getTokenExpiryInfo(bearerToken);
+  if (bearerToken) {
+    log.info('Bearer token', {
+      present: true,
+      masked: maskToken(bearerToken),
+      isValidJWT: !!bearerInfo,
+      expiresIn: bearerInfo ? `${Math.round(bearerInfo.expiresInSeconds / 60)}min` : 'N/A',
+      isExpired: bearerInfo?.isExpired ?? 'unknown'
+    });
+  } else {
+    log.warn('Bearer token: NOT SET (will attempt refresh on first request)');
+  }
+  
+  // Check refresh token
+  const refreshToken = client.cookies?.refreshToken;
+  const refreshInfo = getTokenExpiryInfo(refreshToken);
+  if (refreshToken) {
+    log.info('Refresh token', {
+      present: true,
+      masked: maskToken(refreshToken),
+      isValidJWT: !!refreshInfo,
+      expiresIn: refreshInfo ? `${Math.round(refreshInfo.expiresInSeconds / 3600)}h` : 'N/A',
+      isExpired: refreshInfo?.isExpired ?? 'unknown'
+    });
+    
+    if (!refreshInfo) {
+      log.warn('Refresh token is NOT a valid JWT - this may indicate corruption or an unsupported token format');
+    } else if (refreshInfo.isExpired) {
+      log.error('Refresh token is EXPIRED - re-authentication required (run: npm run extract)');
+    }
+  } else {
+    log.error('Refresh token: NOT SET - authentication will fail (run: npm run extract)');
+  }
+  
+  // Verify .env file matches in-memory state
+  try {
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, 'utf-8');
+      const envRefreshMatch = envContent.match(/^HOPGPT_COOKIE_REFRESH_TOKEN=(.+)$/m);
+      const envRefreshToken = envRefreshMatch ? envRefreshMatch[1].trim() : null;
+      
+      if (envRefreshToken && refreshToken) {
+        const tokensMatch = envRefreshToken === refreshToken;
+        log.debug('.env refresh token verification', {
+          envMasked: maskToken(envRefreshToken),
+          memoryMasked: maskToken(refreshToken),
+          match: tokensMatch
+        });
+        if (!tokensMatch) {
+          log.warn('.env refresh token differs from in-memory token - possible env loading issue');
+        }
+      }
+    }
+  } catch (err) {
+    log.debug('Could not verify .env file', { error: err.message });
+  }
+  
+  // Check Cloudflare cookies
+  const cfClearance = client.cookies?.cf_clearance;
+  const cfBm = client.cookies?.__cf_bm;
+  if (!cfClearance || !cfBm) {
+    log.warn('Cloudflare cookies missing', {
+      cf_clearance: cfClearance ? 'set' : 'NOT SET',
+      __cf_bm: cfBm ? 'set' : 'NOT SET',
+      note: 'This may cause Cloudflare blocks, but TLS fingerprinting should help bypass'
+    });
+  }
+  
+  log.info('=== End Token Diagnostics ===');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -70,6 +166,10 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   log.info(`Server started on port ${PORT}`);
+  
+  // Log token diagnostics on startup
+  logStartupTokenDiagnostics();
+  
   console.log(`
 ╔════════════════════════════════════════════════════════════╗
 ║          HopGPT Anthropic API Proxy                        ║
@@ -81,6 +181,7 @@ app.listen(PORT, () => {
 ║    GET  /v1/models    - List available models              ║
 ║    POST /refresh-token - Refresh HopGPT session token      ║
 ║    GET  /token-status  - Check token expiry status         ║
+║    GET  /token-debug   - Detailed token diagnostics        ║
 ║    GET  /health       - Health check                       ║
 ║                                                            ║
 ║  Usage with Anthropic SDK:                                 ║

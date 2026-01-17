@@ -15,6 +15,17 @@ const log = loggers.hopgpt;
 let envWritePromise = null;
 
 /**
+ * Mask a token for safe logging (show first 10 and last 10 chars)
+ * @param {string} token - Token to mask
+ * @returns {string} Masked token
+ */
+function maskToken(token) {
+  if (!token) return '<not set>';
+  if (token.length <= 24) return '<too short>';
+  return `${token.substring(0, 10)}...${token.substring(token.length - 10)}`;
+}
+
+/**
  * HopGPT API Client
  * Handles authentication and communication with the HopGPT backend
  * Uses node-tls-client to bypass Cloudflare TLS fingerprinting
@@ -243,13 +254,23 @@ export class HopGPTClient {
    */
   async persistCredentials() {
     if (!this.autoPersist) {
+      log.debug('Auto-persist disabled, skipping .env write');
       return;
     }
 
     // FIX P1 #4: In-process mutex - wait for any pending write to complete
     if (envWritePromise) {
+      log.debug('Waiting for pending .env write to complete');
       await envWritePromise;
     }
+
+    const refreshTokenToSave = this.cookies.refreshToken;
+    const bearerTokenToSave = this.bearerToken;
+    
+    log.debug('Persisting credentials to .env', {
+      refreshTokenMasked: maskToken(refreshTokenToSave),
+      bearerTokenMasked: maskToken(bearerTokenToSave)
+    });
 
     // Create the write operation and store it in the mutex
     const writeOperation = (async () => {
@@ -283,11 +304,11 @@ export class HopGPTClient {
 
         // Build new token lines
         const tokenLines = [];
-        if (this.bearerToken) {
-          tokenLines.push(`HOPGPT_BEARER_TOKEN=${this.bearerToken}`);
+        if (bearerTokenToSave) {
+          tokenLines.push(`HOPGPT_BEARER_TOKEN=${bearerTokenToSave}`);
         }
-        if (this.cookies.refreshToken) {
-          tokenLines.push(`HOPGPT_COOKIE_REFRESH_TOKEN=${this.cookies.refreshToken}`);
+        if (refreshTokenToSave) {
+          tokenLines.push(`HOPGPT_COOKIE_REFRESH_TOKEN=${refreshTokenToSave}`);
         }
 
         // Find where to insert token lines (after header comments, before other content)
@@ -313,9 +334,25 @@ export class HopGPTClient {
         // Write back to .env
         fs.writeFileSync(this.envPath, finalContent);
 
-        log.debug('Credentials persisted to .env');
+        // Verify the write succeeded by reading back the refresh token
+        const verifyContent = fs.readFileSync(this.envPath, 'utf-8');
+        const verifyMatch = verifyContent.match(/^HOPGPT_COOKIE_REFRESH_TOKEN=(.+)$/m);
+        const verifiedToken = verifyMatch ? verifyMatch[1].trim() : null;
+        
+        if (refreshTokenToSave && verifiedToken === refreshTokenToSave) {
+          log.info('Credentials persisted and verified in .env', {
+            refreshTokenMasked: maskToken(verifiedToken)
+          });
+        } else if (refreshTokenToSave) {
+          log.error('CRITICAL: .env verification failed - token mismatch!', {
+            expectedMasked: maskToken(refreshTokenToSave),
+            actualMasked: maskToken(verifiedToken)
+          });
+        } else {
+          log.debug('Credentials persisted to .env (no refresh token to verify)');
+        }
       } catch (error) {
-        log.error('Failed to persist credentials', { error: error.message });
+        log.error('Failed to persist credentials', { error: error.message, stack: error.stack });
       } finally {
         // Clear the mutex when done
         envWritePromise = null;
@@ -421,12 +458,23 @@ export class HopGPTClient {
    */
   async _doRefreshTokens() {
     const refreshTokenInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
-      log.info('Attempting token refresh', {
-        refreshTokenExpiry: refreshTokenInfo ? `${refreshTokenInfo.expiresInSeconds}s` : 'invalid'
+    
+    // Enhanced diagnostic logging for refresh token state
+    log.info('Attempting token refresh', {
+      refreshTokenExpiry: refreshTokenInfo ? `${refreshTokenInfo.expiresInSeconds}s` : 'invalid',
+      refreshTokenMasked: maskToken(this.cookies.refreshToken)
+    });
+    
+    if (!refreshTokenInfo) {
+      log.warn('Refresh token diagnostics', {
+        tokenLength: this.cookies.refreshToken?.length || 0,
+        hasThreeParts: this.cookies.refreshToken?.split('.').length === 3,
+        note: 'Token may not be a standard JWT or may be corrupted'
       });
-      log.debug('Refresh token info:', refreshTokenInfo ?
-      `expires in ${Math.round(refreshTokenInfo.expiresInSeconds / 3600)}h, expired: ${refreshTokenInfo.isExpired}` :
-      'no valid refresh token');
+    } else {
+      log.debug('Refresh token info:', 
+        `expires in ${Math.round(refreshTokenInfo.expiresInSeconds / 3600)}h, expired: ${refreshTokenInfo.isExpired}`);
+    }
 
     try {
       const url = `${this.baseURL}/api/auth/refresh`;
@@ -489,24 +537,38 @@ export class HopGPTClient {
 
       // Update cookies from Set-Cookie headers (includes rotated refresh token)
       const oldRefreshToken = this.cookies.refreshToken;
+      const oldRefreshMasked = maskToken(oldRefreshToken);
       
       // Debug: Log raw Set-Cookie headers
       const setCookieHeaders = response.headers['set-cookie'] || response.headers['Set-Cookie'];
       if (setCookieHeaders) {
-        log.debug('Received Set-Cookie headers', { count: Array.isArray(setCookieHeaders) ? setCookieHeaders.length : 1 });
+        const headerArray = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
+        log.debug('Received Set-Cookie headers', { 
+          count: headerArray.length,
+          cookieNames: headerArray.map(h => h.split('=')[0]).join(', ')
+        });
       } else {
-        log.debug('No Set-Cookie headers in refresh response');
+        log.warn('No Set-Cookie headers in refresh response - refresh token will NOT be rotated');
       }
       
       this.updateCookiesFromTLSResponse(response.headers);
 
       // Check if refresh token was rotated
+      const newRefreshMasked = maskToken(this.cookies.refreshToken);
       if (this.cookies.refreshToken && this.cookies.refreshToken !== oldRefreshToken) {
-        log.info('Refresh token rotated by server');
+        log.info('Refresh token rotated by server', {
+          oldToken: oldRefreshMasked,
+          newToken: newRefreshMasked
+        });
         const newRefreshInfo = this._getTokenExpiryInfo(this.cookies.refreshToken);
         log.info('New refresh token expiry', { expiresIn: newRefreshInfo ? `${Math.round(newRefreshInfo.expiresInSeconds / 3600)}h` : 'unknown' });
       } else if (!this.cookies.refreshToken) {
-        log.warn('No refresh token after refresh - future refreshes will fail');
+        log.error('No refresh token after refresh - future refreshes will fail!', {
+          hadOldToken: !!oldRefreshToken,
+          oldToken: oldRefreshMasked
+        });
+      } else {
+        log.debug('Refresh token NOT rotated (same token)', { token: newRefreshMasked });
       }
 
       // Persist new credentials to .env so they survive server restarts

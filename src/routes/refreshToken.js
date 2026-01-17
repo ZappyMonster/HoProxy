@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import fs from 'fs';
+import path from 'path';
 import { getDefaultClient, getTokenExpiryInfo } from '../services/hopgptClient.js';
 import {
   AuthError,
@@ -11,6 +13,15 @@ import { loggers } from '../utils/logger.js';
 
 const log = loggers.auth;
 const router = Router();
+
+/**
+ * Mask a token for safe display (show first 10 and last 10 chars)
+ */
+function maskToken(token) {
+  if (!token) return '<not set>';
+  if (token.length <= 24) return '<too short to mask>';
+  return `${token.substring(0, 10)}...${token.substring(token.length - 10)}`;
+}
 
 /**
  * GET /token-status
@@ -106,6 +117,118 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 export default router;
+
+/**
+ * GET /token-debug
+ * Detailed token diagnostics for debugging auth issues
+ * Compares in-memory state with .env file
+ */
+router.get('/token-debug', (req, res) => {
+  const client = getDefaultClient();
+  const envPath = path.join(process.cwd(), '.env');
+  log.debug('Token debug requested');
+
+  // Get in-memory token info
+  const memoryBearerToken = client.bearerToken;
+  const memoryRefreshToken = client.cookies?.refreshToken;
+  const memoryBearerInfo = getTokenExpiryInfo(memoryBearerToken);
+  const memoryRefreshInfo = getTokenExpiryInfo(memoryRefreshToken);
+
+  // Read tokens from .env file
+  let envBearerToken = null;
+  let envRefreshToken = null;
+  let envReadError = null;
+
+  try {
+    if (fs.existsSync(envPath)) {
+      const envContent = fs.readFileSync(envPath, 'utf-8');
+      const bearerMatch = envContent.match(/^HOPGPT_BEARER_TOKEN=(.+)$/m);
+      const refreshMatch = envContent.match(/^HOPGPT_COOKIE_REFRESH_TOKEN=(.+)$/m);
+      envBearerToken = bearerMatch ? bearerMatch[1].trim() : null;
+      envRefreshToken = refreshMatch ? refreshMatch[1].trim() : null;
+    }
+  } catch (err) {
+    envReadError = err.message;
+  }
+
+  const envBearerInfo = getTokenExpiryInfo(envBearerToken);
+  const envRefreshInfo = getTokenExpiryInfo(envRefreshToken);
+
+  const debug = {
+    timestamp: new Date().toISOString(),
+    memory: {
+      bearerToken: {
+        present: !!memoryBearerToken,
+        masked: maskToken(memoryBearerToken),
+        length: memoryBearerToken?.length || 0,
+        isValidJWT: !!memoryBearerInfo,
+        expiresIn: memoryBearerInfo ? `${Math.round(memoryBearerInfo.expiresInSeconds / 60)}min` : null,
+        isExpired: memoryBearerInfo?.isExpired ?? null
+      },
+      refreshToken: {
+        present: !!memoryRefreshToken,
+        masked: maskToken(memoryRefreshToken),
+        length: memoryRefreshToken?.length || 0,
+        isValidJWT: !!memoryRefreshInfo,
+        hasThreeParts: memoryRefreshToken?.split('.').length === 3,
+        expiresIn: memoryRefreshInfo ? `${Math.round(memoryRefreshInfo.expiresInSeconds / 3600)}h` : null,
+        isExpired: memoryRefreshInfo?.isExpired ?? null
+      }
+    },
+    envFile: {
+      path: envPath,
+      readError: envReadError,
+      bearerToken: {
+        present: !!envBearerToken,
+        masked: maskToken(envBearerToken),
+        length: envBearerToken?.length || 0,
+        isValidJWT: !!envBearerInfo,
+        matchesMemory: envBearerToken === memoryBearerToken
+      },
+      refreshToken: {
+        present: !!envRefreshToken,
+        masked: maskToken(envRefreshToken),
+        length: envRefreshToken?.length || 0,
+        isValidJWT: !!envRefreshInfo,
+        hasThreeParts: envRefreshToken?.split('.').length === 3,
+        matchesMemory: envRefreshToken === memoryRefreshToken
+      }
+    },
+    cloudflare: {
+      cf_clearance: client.cookies?.cf_clearance ? 'set' : 'NOT SET',
+      __cf_bm: client.cookies?.__cf_bm ? 'set' : 'NOT SET'
+    },
+    config: {
+      autoRefresh: client.autoRefresh,
+      autoPersist: client.autoPersist,
+      proactiveRefreshBufferSec: client.proactiveRefreshBufferSec
+    },
+    diagnosis: []
+  };
+
+  // Add diagnostic messages
+  if (!memoryRefreshToken) {
+    debug.diagnosis.push('CRITICAL: No refresh token in memory - run npm run extract');
+  } else if (!memoryRefreshInfo) {
+    debug.diagnosis.push('WARNING: Refresh token is not a valid JWT - may be corrupted or unsupported format');
+  } else if (memoryRefreshInfo.isExpired) {
+    debug.diagnosis.push('CRITICAL: Refresh token is expired - run npm run extract');
+  }
+
+  if (envRefreshToken && memoryRefreshToken && envRefreshToken !== memoryRefreshToken) {
+    debug.diagnosis.push('WARNING: .env refresh token differs from memory - token may have been rotated but not yet persisted');
+  }
+
+  if (!envRefreshToken && memoryRefreshToken) {
+    debug.diagnosis.push('WARNING: Refresh token in memory but not in .env - persistence may have failed');
+  }
+
+  if (debug.diagnosis.length === 0) {
+    debug.diagnosis.push('OK: Token state appears healthy');
+  }
+
+  res.json(debug);
+});
 
 function mapAuthErrorStatus(error) {
   if (error instanceof RefreshTokenExpiredError || error instanceof TokenRefreshError) {
