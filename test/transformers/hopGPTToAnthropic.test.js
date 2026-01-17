@@ -966,7 +966,8 @@ ${JSON.stringify(toolUsePayload, null, 2)}
     expect(toolUseBlocks.length).toBe(2);
     expect(toolUseBlocks[0].name).toBe('edit');
     expect(toolUseBlocks[0].input.filePath).toBe('/tmp/example.js');
-    expect(toolUseBlocks[0].input.oldString).toContain('</tool_call>');
+    // The oldString contains regex source code with an escaped forward slash
+    expect(toolUseBlocks[0].input.oldString).toContain('<\\/tool_call>');
     expect(toolUseBlocks[1].name).toBe('Read');
     expect(toolUseBlocks[1].input).toEqual({ path: 'README.md' });
   });
@@ -1990,5 +1991,275 @@ line3"}}
       .join('');
 
     expect(text).toBe(summaryTable);
+  });
+
+  it('parses parameter values containing closing tag text', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Parameter value contains </parameter> as text - should not truncate
+    const invokeCall = `<invoke name="Edit">
+<parameter name="oldString">Text with </parameter> tag in it</parameter>
+<parameter name="newString">Replacement text</parameter>
+</invoke>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: invokeCall }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('Edit');
+    // The full value including </parameter> should be captured
+    expect(toolUseBlocks[0].input.oldString).toBe('Text with </parameter> tag in it');
+    expect(toolUseBlocks[0].input.newString).toBe('Replacement text');
+  });
+
+  it('parses invoke blocks containing closing tag text in JSON', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Invoke block with JSON containing </invoke> as a string value
+    const functionCalls = `<function_calls>
+<invoke name="Write">
+<parameter name="content">{"example": "text with </invoke> tag"}</parameter>
+</invoke>
+<invoke name="Read">
+<parameter name="path">/tmp/file.txt</parameter>
+</invoke>
+</function_calls>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: functionCalls }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    // Both invoke blocks should be parsed
+    expect(toolUseBlocks.length).toBe(2);
+    expect(toolUseBlocks[0].name).toBe('Write');
+    expect(toolUseBlocks[0].input.content).toBe('{"example": "text with </invoke> tag"}');
+    expect(toolUseBlocks[1].name).toBe('Read');
+    expect(toolUseBlocks[1].input.path).toBe('/tmp/file.txt');
+  });
+
+  it('parses MCP tool calls with nested closing tags in arguments', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // MCP tool call with </arguments> in the JSON content
+    const mcpToolCall = `<mcp_tool_call>
+<server_name>test-server</server_name>
+<tool_name>process_xml</tool_name>
+<arguments>{"xml": "<data></arguments></data>", "mode": "parse"}</arguments>
+</mcp_tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: mcpToolCall }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('process_xml');
+    expect(toolUseBlocks[0].input.xml).toBe('<data></arguments></data>');
+    expect(toolUseBlocks[0].input.mode).toBe('parse');
+  });
+
+  it('parses tool_call blocks with closing tag in JSON string', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // tool_call with </tool_call> in the JSON content
+    const toolCall = `<tool_call>
+{"name": "edit", "parameters": {"oldString": "match </tool_call> text", "newString": "replaced"}}
+</tool_call>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: toolCall }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('edit');
+    expect(toolUseBlocks[0].input.oldString).toBe('match </tool_call> text');
+    expect(toolUseBlocks[0].input.newString).toBe('replaced');
+  });
+
+  it('handles escaped quotes in XML attribute values', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5-thinking', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    // Tool use with escaped quote in attribute
+    const toolUse = `<tool_use id="toolu_123" name="test_tool">
+{"key": "value"}
+</tool_use>`;
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: toolUse }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const response = transformer.buildNonStreamingResponse();
+    const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
+
+    expect(toolUseBlocks.length).toBe(1);
+    expect(toolUseBlocks[0].name).toBe('test_tool');
+    expect(toolUseBlocks[0].id).toBe('toolu_123');
   });
 });
