@@ -354,6 +354,9 @@ curl -X POST http://localhost:3001/refresh-token
 | `NO_COLOR` | Standard env var to disable colored output (default: unset) |
 | `HOPGPT_STREAMING_TRANSPORT` | Streaming transport: `fetch` or `tls` (default: `fetch`) |
 | `SIGNATURE_CACHE_TTL_MS` | Tool signature cache TTL in ms (default: 3600000) |
+| `HOPGPT_TOOL_CALL_BUFFER_SIZE` | Max buffer size for streaming tool call detection (default: 1000000) |
+| `HOPGPT_TOOL_CALL_BUFFER_WARN_THRESHOLD` | Buffer size that triggers warning logs (default: 50000) |
+| `HOPGPT_TOOL_CALL_BUFFER_WARN_STEP` | Increment for subsequent buffer warnings (default: 200000) |
 
 Extraction-only:
 - `HOPGPT_PUPPETEER_CHANNEL`
@@ -364,6 +367,7 @@ Extraction-only:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/messages` | POST | Anthropic Messages API (streaming and non-streaming) |
+| `/v1/messages/count_tokens` | POST | Token counting (returns 501 Not Implemented) |
 | `/v1/models` | GET | List available models |
 | `/v1/models/:model_id` | GET | Fetch a specific model |
 | `/refresh-token` | POST | Refresh HopGPT bearer token using refresh cookie |
@@ -413,13 +417,12 @@ HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 
 ```
 src/
-├── index.js                    # Express server entry point
+├── index.js                    # Express server entry point, route mounting, health endpoint
 ├── extract-credentials.js      # Puppeteer credential extraction script (npm run extract)
 ├── errors/
 │   └── authErrors.js           # Authentication error classes
 ├── routes/
-│   ├── index.js                # Route wiring, /health endpoint
-│   ├── messages.js             # /v1/messages endpoint
+│   ├── messages.js             # /v1/messages and /v1/messages/count_tokens endpoints
 │   ├── models.js               # /v1/models endpoints
 │   └── refreshToken.js         # /refresh-token and /token-status endpoints
 ├── transformers/

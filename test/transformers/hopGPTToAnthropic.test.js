@@ -1496,6 +1496,60 @@ line3"}}
     expect(parsedInput.path).toBe('README.md');
   });
 
+  it('recovers incomplete function_calls blocks at end of stream', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: '<function_calls><invoke name="Write"><parameter name="path">README.md</parameter><parameter name="content">Hello</parameter></invoke>' }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(1);
+    expect(toolBlocks[0].data?.content_block?.name).toBe('Write');
+
+    const inputJson = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'input_json_delta')
+      .map(evt => evt.data.delta.partial_json)
+      .join('');
+    const parsedInput = JSON.parse(inputJson);
+    expect(parsedInput.path).toBe('README.md');
+    expect(parsedInput.content).toBe('Hello');
+  });
+
   it('does not buffer quoted tool tags in documentation text', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
       thinkingEnabled: false
@@ -1869,5 +1923,72 @@ line3"}}
     expect(text).not.toContain('<tool_call>');
     expect(text).not.toMatch(/\bH:\s/);
     expect(text).not.toMatch(/\bA:\s/);
+  });
+
+  it('deduplicates repeated large text chunks in streaming', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    const summaryTable = [
+      '| Tool | Result |',
+      '| --- | --- |',
+      '| Bash | ok |',
+      '| Read | ok |',
+      '| Write | ok |',
+      '| Glob | ok |',
+      '| List | ok |',
+      '| Edit | ok |'
+    ].join('\n');
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: summaryTable }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: summaryTable }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const text = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'text_delta')
+      .map(evt => evt.data.delta.text)
+      .join('');
+
+    expect(text).toBe(summaryTable);
   });
 });

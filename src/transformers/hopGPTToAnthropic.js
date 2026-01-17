@@ -60,6 +60,25 @@ const MAX_TOOL_CALL_BUFFER_SIZE = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_SI
   ? CONFIGURED_TOOL_CALL_BUFFER_SIZE
   : DEFAULT_MAX_TOOL_CALL_BUFFER_SIZE;
 
+const DEFAULT_TOOL_CALL_BUFFER_WARN_THRESHOLD = 50000;
+const DEFAULT_TOOL_CALL_BUFFER_WARN_STEP = 200000;
+const CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD = Number.parseInt(
+  process.env.HOPGPT_TOOL_CALL_BUFFER_WARN_THRESHOLD,
+  10
+);
+const CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP = Number.parseInt(
+  process.env.HOPGPT_TOOL_CALL_BUFFER_WARN_STEP,
+  10
+);
+const TOOL_CALL_BUFFER_WARN_THRESHOLD = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD) &&
+  CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD
+  : DEFAULT_TOOL_CALL_BUFFER_WARN_THRESHOLD;
+const TOOL_CALL_BUFFER_WARN_STEP = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP) &&
+  CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP
+  : DEFAULT_TOOL_CALL_BUFFER_WARN_STEP;
+
 const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
 const TOOL_INSTRUCTION_MARKERS = [
   '# available tools',
@@ -68,6 +87,7 @@ const TOOL_INSTRUCTION_MARKERS = [
   'important: you must use this exact xml format to call tools'
 ];
 const SANITIZE_TAIL_LENGTH = 120;
+const DUPLICATE_TEXT_CHUNK_MIN_LENGTH = 80;
 const ROLE_PREFIX_RE = /(^|\r?\n)\s*(?:H:|A:|Human:|Assistant:)\s*/g;
 
 function includesAny(haystack, needles) {
@@ -1099,41 +1119,53 @@ function parseAnyToolCallBlock(block) {
   return [];
 }
 
-function parseIncompleteToolCallBlock(block) {
+function parseIncompleteToolCallBlocks(block, options = {}) {
   if (!block) {
-    return null;
+    return [];
   }
 
   const leadingTag = getLeadingTagName(block);
   if (!leadingTag) {
-    return null;
+    return [];
+  }
+
+  const allowFunctionCalls = options.allowFunctionCalls !== false;
+
+  if (allowFunctionCalls) {
+    if (leadingTag === 'function_calls' || leadingTag === 'antml:function_calls') {
+      return parseFunctionCallsBlock(block);
+    }
+    if (leadingTag === 'invoke' || leadingTag === 'antml:invoke') {
+      const toolCall = parseInvokeBlock(block);
+      return toolCall ? [toolCall] : [];
+    }
   }
 
   if (leadingTag === 'tool_call') {
     const startTagEnd = block.indexOf('>');
     if (startTagEnd === -1) {
-      return null;
+      return [];
     }
     const jsonContent = block.slice(startTagEnd + 1).trim();
     if (!jsonContent) {
-      return null;
+      return [];
     }
     const toolCall = parseToolCallJsonContent(jsonContent);
     if (!toolCall) {
-      return null;
+      return [];
     }
-    return {
+    return [{
       serverName: null,
       toolName: toolCall.toolName,
       toolUseId: toolCall.toolUseId,
       arguments: toolCall.arguments
-    };
+    }];
   }
 
   if (leadingTag === 'tool_use') {
     const startTagEnd = block.indexOf('>');
     if (startTagEnd === -1) {
-      return null;
+      return [];
     }
     const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
     const toolName = extractXmlAttribute(block, 'tool_use', 'name');
@@ -1152,30 +1184,30 @@ function parseIncompleteToolCallBlock(block) {
         }
         parsedArgs = repairedInput !== null ? repairedInput : { _raw: trimmedInput };
       }
-      return {
+      return [{
         serverName: null,
         toolName,
         toolUseId,
         arguments: parsedArgs
-      };
+      }];
     }
 
     if (!inputText) {
-      return null;
+      return [];
     }
     const toolCall = parseToolCallJsonContent(inputText);
     if (!toolCall) {
-      return null;
+      return [];
     }
-    return {
+    return [{
       serverName: null,
       toolName: toolCall.toolName,
       toolUseId: toolUseId || toolCall.toolUseId,
       arguments: toolCall.arguments
-    };
+    }];
   }
 
-  return null;
+  return [];
 }
 
 function splitMcpToolCalls(text, allowIncomplete = false) {
@@ -1187,9 +1219,11 @@ function splitMcpToolCalls(text, allowIncomplete = false) {
   if (lastIndex < text.length) {
     const remainder = text.slice(lastIndex);
     if (allowIncomplete) {
-      const incomplete = parseIncompleteToolCallBlock(remainder);
-      if (incomplete) {
-        segments.push({ type: 'tool_call', toolCall: incomplete });
+      const incompleteBlocks = parseIncompleteToolCallBlocks(remainder);
+      if (incompleteBlocks.length > 0) {
+        for (const toolCall of incompleteBlocks) {
+          segments.push({ type: 'tool_call', toolCall });
+        }
         return segments;
       }
     }
@@ -1218,12 +1252,16 @@ function splitStreamTextForMcpToolCalls(text) {
     const startIndex = nextTag.index;
     const potentialRemainder = trailing.slice(startIndex);
     if (potentialRemainder.length > MAX_BUFFER_SIZE) {
-      const incomplete = parseIncompleteToolCallBlock(potentialRemainder);
-      if (incomplete) {
+      const incompleteBlocks = parseIncompleteToolCallBlocks(potentialRemainder, {
+        allowFunctionCalls: false
+      });
+      if (incompleteBlocks.length > 0) {
         if (startIndex > 0) {
           segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
         }
-        segments.push({ type: 'tool_call', toolCall: incomplete });
+        for (const toolCall of incompleteBlocks) {
+          segments.push({ type: 'tool_call', toolCall });
+        }
         return { segments, remainder: '' };
       }
       if (startIndex > 0) {
@@ -1332,6 +1370,7 @@ export class HopGPTToAnthropicTransformer {
     this.thinkingSignature = null;
     this.mcpToolCallBuffer = '';
     this._toolBufferWarningEmitted = false;
+    this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
 
     // Tool use support
     this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
@@ -1371,6 +1410,7 @@ export class HopGPTToAnthropicTransformer {
 
     this._textSanitizeBuffer = '';
     this._toolLeakActive = false;
+    this._lastTextChunk = null;
 
     this.maxTokens = normalizeMaxTokens(options.maxTokens);
     this.stopSequences = normalizeStopSequences(options.stopSequences);
@@ -1440,6 +1480,7 @@ export class HopGPTToAnthropicTransformer {
         if (this.stopOnToolUse && this._stopRequested && !this._hasEmittedMessageStop) {
           this.mcpToolCallBuffer = '';
           this._toolBufferWarningEmitted = false;
+          this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
           const stopEvents = this._createMessageStop();
           if (stopEvents) {
             events.push(...stopEvents);
@@ -1492,6 +1533,7 @@ export class HopGPTToAnthropicTransformer {
       if (finalContent && finalContent.length > 0 && !this.hasEmittedNonThinkingContent) {
         this.mcpToolCallBuffer = '';
         this._toolBufferWarningEmitted = false;
+        this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
         const finalEvents = this._emitFinalContentBlocks(finalContent);
         if (finalEvents.length > 0) {
           events.push(...finalEvents);
@@ -1663,19 +1705,27 @@ export class HopGPTToAnthropicTransformer {
 
       if (!remainder) {
         this._toolBufferWarningEmitted = false;
+        this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
       }
 
-      // Debug: Log buffer state once when it exceeds the threshold.
-      if (process.env.HOPGPT_DEBUG === 'true') {
-        if (remainder &&
-            remainder.length > MAX_TOOL_CALL_BUFFER_SIZE &&
-            !this._toolBufferWarningEmitted) {
-          this._toolBufferWarningEmitted = true;
-          log.debug('Tool call buffer exceeded threshold', {
-            size: remainder.length,
-            preview: remainder.slice(0, 200)
-          });
+      if (remainder && remainder.length >= this._nextToolBufferWarningAt) {
+        const preview = remainder.slice(0, 200);
+        log.warn('Large tool call buffer detected', {
+          size: remainder.length,
+          nextWarningAt: this._nextToolBufferWarningAt,
+          preview
+        });
+        if (TOOL_CALL_BUFFER_WARN_STEP > 0) {
+          const steps = Math.floor(
+            (remainder.length - this._nextToolBufferWarningAt) / TOOL_CALL_BUFFER_WARN_STEP
+          ) + 1;
+          this._nextToolBufferWarningAt += steps * TOOL_CALL_BUFFER_WARN_STEP;
+        } else {
+          this._nextToolBufferWarningAt = remainder.length + 1;
         }
+      }
+
+      if (process.env.HOPGPT_DEBUG === 'true') {
         const toolCalls = segments.filter(s => s.type === 'tool_call');
         if (toolCalls.length > 0) {
           console.log(`[Transform] Parsed ${toolCalls.length} tool calls from text`);
@@ -1738,6 +1788,12 @@ export class HopGPTToAnthropicTransformer {
         if (this.mcpPassthrough) {
           const sanitizedText = sanitizeTextFull(block.text || '');
           if (sanitizedText) {
+            const lastBlock = this.contentBlocks[this.contentBlocks.length - 1];
+            if (lastBlock?.type === 'text' &&
+                sanitizedText.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+                sanitizedText === lastBlock.text) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'text',
               text: sanitizedText
@@ -1755,6 +1811,12 @@ export class HopGPTToAnthropicTransformer {
           }
           if (segment.type === 'text') {
             if (!segment.text) continue;
+            const lastBlock = this.contentBlocks[this.contentBlocks.length - 1];
+            if (lastBlock?.type === 'text' &&
+                segment.text.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+                segment.text === lastBlock.text) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'text',
               text: segment.text
@@ -1883,6 +1945,17 @@ export class HopGPTToAnthropicTransformer {
     const events = [];
     this.hasEmittedNonThinkingContent = true;
 
+    const startingNewTextBlock = !this.blockStarted || this.currentBlockType !== 'text';
+    if (startingNewTextBlock) {
+      this._lastTextChunk = null;
+    }
+
+    if (this._lastTextChunk &&
+        text.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+        text === this._lastTextChunk) {
+      return [];
+    }
+
     if (this.blockStarted && this.currentBlockType !== 'text') {
       // Save tool use before switching away from tool_use block
       if (this.currentBlockType === 'tool_use' && this.currentToolUse) {
@@ -1913,6 +1986,7 @@ export class HopGPTToAnthropicTransformer {
         }
       }
     });
+    this._lastTextChunk = text;
 
     return events;
   }
@@ -2259,6 +2333,7 @@ export class HopGPTToAnthropicTransformer {
       }
       this.mcpToolCallBuffer = '';
       this._toolBufferWarningEmitted = false;
+      this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
     }
 
     // Save current tool use if still in progress
