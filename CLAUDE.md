@@ -34,9 +34,11 @@ Anthropic SDK Client
         ▼
 ┌─────────────────────────────────────────┐
 │  Routes (src/routes/)                   │
+│  • index.js - Route wiring, /health     │
 │  • messages.js - /v1/messages           │
-│  • models.js - /v1/models               │
-│  • refreshToken.js - /refresh-token     │
+│  • models.js - /v1/models, /v1/models/:id │
+│  • refreshToken.js - /refresh-token,   │
+│    /token-status                        │
 └─────────────────┬───────────────────────┘
                   ▼
 ┌─────────────────────────────────────────┐
@@ -55,6 +57,16 @@ Anthropic SDK Client
 │  • browserCredentials.js - Puppeteer    │
 └─────────────────┬───────────────────────┘
                   ▼
+┌─────────────────────────────────────────┐
+│  Utils (src/utils/)                     │
+│  • logger.js - Structured logging       │
+│  • modelMapping.js - Model name aliases │
+│  • sseParser.js - SSE stream parsing    │
+├─────────────────────────────────────────┤
+│  Errors (src/errors/)                   │
+│  • authErrors.js - Auth error classes   │
+└─────────────────┬───────────────────────┘
+                  ▼
          HopGPT Backend
 ```
 
@@ -69,9 +81,11 @@ Anthropic SDK Client
 - `<function_calls><invoke name="...">` - Claude Code / OpenCode format
 - `<tool_call>{JSON}</tool_call>` - JSON format
 
-**Session Management**: Uses `X-Session-Id` header or `metadata.session_id` to maintain conversation threading via `parentMessageId`.
+**Session Management**: Uses `X-Session-Id` header (or `X-SessionID`) or `metadata.session_id`/`metadata.conversation_id` to maintain conversation threading via `parentMessageId`. Reset sessions with `X-Conversation-Reset: true` header or `metadata.conversation_reset`/`metadata.reset`/`metadata.new_conversation` set to `true`.
 
-**Model Aliases**: Flexible naming via `modelMapping.js` (e.g., `claude-opus-4-5-thinking`, `claude-opus-4.5`, `claude-4.5` all resolve correctly).
+**MCP Passthrough**: Enable with `x-mcp-passthrough: true` header or `metadata.mcp_passthrough: true` to keep tool call XML in the text response instead of converting to `tool_use` blocks. Use for clients that parse XML directly.
+
+**Model Aliases**: Flexible naming via `modelMapping.js`. Supports opus-4.5, sonnet-4.5, and haiku-4.5 with automatic `-thinking` suffix handling and version variants (e.g., `claude-opus-4-5`, `claude-opus-4.5`, `claude-opus-4-5-thinking` all resolve correctly).
 
 ## Coding Style
 
@@ -91,9 +105,30 @@ Anthropic SDK Client
 
 Minimum required: `HOPGPT_COOKIE_REFRESH_TOKEN`
 
-Key variables:
+**Core settings:**
 - `PORT` - Server port (default: 3001)
 - `HOPGPT_BEARER_TOKEN` - JWT token (auto-refreshed if refresh token is set)
 - `HOPGPT_USER_AGENT` - Browser User-Agent for Cloudflare
-- `HOPGPT_DEBUG` - Enable debug logging
+
+**Authentication cookies:**
+- `HOPGPT_COOKIE_REFRESH_TOKEN` - Required for token refresh
+- `HOPGPT_COOKIE_CF_CLEARANCE` - Cloudflare clearance cookie
+- `HOPGPT_COOKIE_CONNECT_SID` - Connect session ID
+- `HOPGPT_COOKIE_CF_BM` - Cloudflare bot management cookie
+- `HOPGPT_COOKIE_TOKEN_PROVIDER` - Token provider (default: librechat)
+
+**Logging:**
+- `HOPGPT_DEBUG` - Enable debug logging (true/false)
+- `HOPGPT_LOG_LEVEL` - Log level (debug/info/warn/error/silent)
+- `HOPGPT_LOG_NO_COLOR` or `NO_COLOR` - Disable colored log output
+
+**Caching/TTL:**
 - `CONVERSATION_TTL_MS` - Session state TTL (default: 6 hours)
+- `SIGNATURE_CACHE_TTL_MS` - Signature cache TTL
+
+**Browser automation (Puppeteer):**
+- `HOPGPT_PUPPETEER_USER_DATA_DIR` - Chrome user data directory
+- `HOPGPT_PUPPETEER_CHANNEL` - Browser channel (default: chrome)
+
+**Transport:**
+- `HOPGPT_STREAMING_TRANSPORT` - Streaming transport mode

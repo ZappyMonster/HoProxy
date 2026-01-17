@@ -1,69 +1,67 @@
 # HopGPT Anthropic API Proxy
 
-A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (notably `/v1/messages`) and translates requests to the HopGPT backend at `https://chat.ai.jh.edu`. Includes browser credential extraction, TLS fingerprinting, conversation state, and automatic token refresh.
+A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints and translates requests to the HopGPT backend at `https://chat.ai.jh.edu`. Use it to connect Claude Code, OpenCode, or any Anthropic SDK client to HopGPT.
 
-## Requirements
+## Table of Contents
 
-- Node.js 18+
+- [Quick Start](#quick-start)
+- [Client Setup](#client-setup)
+  - [Claude Code](#claude-code)
+  - [OpenCode](#opencode)
+  - [Anthropic SDK](#anthropic-sdk)
+- [Available Models](#available-models)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Conversation State](#conversation-state)
+  - [Authentication](#authentication)
+- [Tool Use Support](#tool-use-support)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Testing](#testing)
+- [License](#license)
 
-## Setup
+---
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+## Quick Start
 
-2. **Configure authentication:**
+**Requirements:** Node.js 18+
 
-   **Option A: Automatic extraction (recommended)**
+```bash
+# 1. Install dependencies
+npm install
 
-   Run the extraction script to open a browser, log in, and save credentials to `.env`:
-   ```bash
-   npm run extract
-   ```
+# 2. Extract credentials (opens browser for login)
+npm run extract
 
-   Optional flags:
-   ```bash
-   npm run extract -- --timeout 600 --env-path ./custom.env
-   ```
+# 3. Start the proxy
+npm start
+```
 
-   Optional environment variables for extraction:
-   - `HOPGPT_PUPPETEER_CHANNEL` (default: `chrome`)
-   - `HOPGPT_PUPPETEER_USER_DATA_DIR` (reuse a browser profile)
+The proxy listens on `http://localhost:3001` by default.
 
-   **Option B: Manual extraction**
+### Manual Credential Setup
 
-   Create a `.env` file and set values from your browser session:
-   - Open HopGPT (`https://chat.ai.jh.edu`)
-   - DevTools (F12) → Network tab
-   - Send a message and inspect the request to `/api/agents/chat/AnthropicClaude`
-   - Copy values from headers/cookies:
-     - `Authorization` header → `HOPGPT_BEARER_TOKEN` (optional if refresh token is set)
-     - `User-Agent` header → `HOPGPT_USER_AGENT`
-     - `Cookie` header → individual cookie values
+If automatic extraction fails, create a `.env` file manually:
 
-   Example `.env`:
-   ```bash
-   HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
-   HOPGPT_BEARER_TOKEN=eyJhbGciOiJIUzI1NiIs...
-   HOPGPT_USER_AGENT="Mozilla/5.0 ..."
-   HOPGPT_COOKIE_CF_CLEARANCE=...
-   HOPGPT_COOKIE_CONNECT_SID=...
-   HOPGPT_COOKIE_CF_BM=...
-   HOPGPT_COOKIE_TOKEN_PROVIDER=librechat
-   ```
+1. Open HopGPT (`https://chat.ai.jh.edu`) in your browser
+2. DevTools (F12) → Network tab → send a message
+3. Inspect the request to `/api/agents/chat/AnthropicClaude`
+4. Copy values from headers/cookies:
 
-3. **Start the server:**
-   ```bash
-   npm start
-   ```
+```bash
+# .env (minimum required)
+HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 
-   Or with auto-reload for development:
-   ```bash
-   npm run dev
-   ```
+# Optional (auto-obtained via refresh token)
+HOPGPT_BEARER_TOKEN=eyJhbGciOiJIUzI1NiIs...
+HOPGPT_USER_AGENT="Mozilla/5.0 ..."
+HOPGPT_COOKIE_CF_CLEARANCE=...
+HOPGPT_COOKIE_CONNECT_SID=...
+HOPGPT_COOKIE_CF_BM=...
+```
 
-   Set `PORT` to change the listening port (default: `3001`).
+---
 
 ## Claude Code Setup
 
@@ -96,7 +94,7 @@ Create or edit `~/.claude/settings.json`:
   "env": {
     "ANTHROPIC_AUTH_TOKEN": "test",
     "ANTHROPIC_BASE_URL": "http://localhost:3001",
-    "ANTHROPIC_MODEL": "claude-sonnet-4.5"
+    "ANTHROPIC_MODEL": "claude-sonnet-4-5"
   }
 }
 ```
@@ -109,7 +107,7 @@ If you prefer shell environment variables instead of `settings.json`:
 ```bash
 export ANTHROPIC_AUTH_TOKEN=test
 export ANTHROPIC_BASE_URL=http://localhost:3001
-export ANTHROPIC_MODEL=claude-sonnet-4.5
+export ANTHROPIC_MODEL=claude-sonnet-4-5
 ```
 
 ### 5) Troubleshooting common issues
@@ -126,14 +124,16 @@ export ANTHROPIC_MODEL=claude-sonnet-4.5
 
 | Model (canonical) | Capability notes |
 |-------------------|------------------|
-| `claude-opus-4.5` | Highest quality; best for complex reasoning and long-form outputs. |
-| `claude-sonnet-4.5` | Balanced speed/quality; good default for most tasks. |
-| `claude-haiku-4.5` | Fastest model; best for low-latency tasks. |
+| `claude-opus-4-5` | Highest quality; best for complex reasoning and long-form outputs. |
+| `claude-sonnet-4-5` | Balanced speed/quality; good default for most tasks. |
+| `claude-haiku-4-5` | Fastest model; best for low-latency tasks. |
 
 Aliases accepted by the proxy include:
-- `claude-opus-4-5`, `claude-opus-4-5-thinking`, `claude-opus-4.5-thinking`, `claude-4-5-opus`, `claude-4.5-opus`, `opus-4-5`, `opus-4.5`
-- `claude-sonnet-4-5`, `claude-sonnet-4-5-thinking`, `claude-sonnet-4.5-thinking`, `claude-4-5-sonnet`, `claude-4.5-sonnet`, `sonnet-4-5`, `sonnet-4.5`
-- `claude-haiku-4-5`, `claude-haiku-4-5-thinking`, `claude-haiku-4.5-thinking`, `claude-4-5-haiku`, `claude-4.5-haiku`, `haiku-4-5`, `haiku-4.5`
+- `claude-opus-4.5`, `claude-opus-4-5-thinking`, `claude-opus-4.5-thinking`
+- `claude-sonnet-4.5`, `claude-sonnet-4-5-thinking`, `claude-sonnet-4.5-thinking`
+- `claude-haiku-4.5`, `claude-haiku-4-5-thinking`, `claude-haiku-4.5-thinking`
+
+**Note:** The `-thinking` suffix is accepted for input but not included in canonical model names returned by `/v1/models`. The proxy enables thinking mode internally based on model capabilities.
 
 ## OpenCode Setup
 
@@ -268,7 +268,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="claude-sonnet-4.5",
+    model="claude-sonnet-4-5",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -286,7 +286,7 @@ const client = new Anthropic({
 });
 
 const message = await client.messages.create({
-  model: 'claude-sonnet-4.5',
+  model: 'claude-sonnet-4-5',
   max_tokens: 1024,
   messages: [{ role: 'user', content: 'Hello!' }]
 });
@@ -302,7 +302,7 @@ If your SDK version does not support `baseURL`, use the `curl` example below ins
 curl http://localhost:3001/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4.5",
+    "model": "claude-sonnet-4-5",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -347,11 +347,14 @@ curl -X POST http://localhost:3001/refresh-token
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
 | `CONVERSATION_TTL_MS` | In-memory conversation state TTL in ms (default: 21600000) |
 | `HOPGPT_DEBUG` | Enable debug logging for troubleshooting (default: unset) |
-| `HOPGPT_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `HOPGPT_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error`, `silent` (default: `info`) |
 | `HOPGPT_LOG_NO_COLOR` | Disable colored log output (default: unset) |
 | `NO_COLOR` | Standard env var to disable colored output (default: unset) |
 | `HOPGPT_STREAMING_TRANSPORT` | Streaming transport: `fetch` or `tls` (default: `fetch`) |
 | `SIGNATURE_CACHE_TTL_MS` | Tool signature cache TTL in ms (default: 3600000) |
+| `HOPGPT_TOOL_CALL_BUFFER_SIZE` | Max buffer size for streaming tool call detection (default: 1000000) |
+| `HOPGPT_TOOL_CALL_BUFFER_WARN_THRESHOLD` | Buffer size that triggers warning logs (default: 50000) |
+| `HOPGPT_TOOL_CALL_BUFFER_WARN_STEP` | Increment for subsequent buffer warnings (default: 200000) |
 
 Extraction-only:
 - `HOPGPT_PUPPETEER_CHANNEL`
@@ -362,6 +365,7 @@ Extraction-only:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/v1/messages` | POST | Anthropic Messages API (streaming and non-streaming) |
+| `/v1/messages/count_tokens` | POST | Token counting (returns 501 Not Implemented) |
 | `/v1/models` | GET | List available models |
 | `/v1/models/:model_id` | GET | Fetch a specific model |
 | `/refresh-token` | POST | Refresh HopGPT bearer token using refresh cookie |
@@ -411,12 +415,14 @@ HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 
 ```
 src/
-├── index.js                    # Express server entry point
+├── index.js                    # Express server entry point, route mounting, health endpoint
 ├── extract-credentials.js      # Puppeteer credential extraction script (npm run extract)
+├── errors/
+│   └── authErrors.js           # Authentication error classes
 ├── routes/
-│   ├── messages.js             # /v1/messages endpoint
+│   ├── messages.js             # /v1/messages and /v1/messages/count_tokens endpoints
 │   ├── models.js               # /v1/models endpoints
-│   └── refreshToken.js         # /refresh-token endpoint
+│   └── refreshToken.js         # /refresh-token and /token-status endpoints
 ├── transformers/
 │   ├── anthropicToHopGPT.js    # Request transformation
 │   ├── hopGPTToAnthropic.js    # SSE response transformation

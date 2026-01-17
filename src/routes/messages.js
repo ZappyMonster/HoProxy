@@ -1,7 +1,19 @@
 import { Router } from 'express';
-import { transformAnthropicToHopGPT, extractThinkingConfig, normalizeSystemPrompt } from '../transformers/anthropicToHopGPT.js';
+import {
+  transformAnthropicToHopGPT,
+  extractThinkingConfig,
+  normalizeSystemPrompt,
+  getToolChoiceConfig
+} from '../transformers/anthropicToHopGPT.js';
 import { HopGPTToAnthropicTransformer, formatSSEEvent } from '../transformers/hopGPTToAnthropic.js';
 import { getDefaultClient, HopGPTError } from '../services/hopgptClient.js';
+import {
+  AuthError,
+  RefreshTokenExpiredError,
+  TokenRefreshError,
+  CloudflareBlockedError,
+  NetworkError
+} from '../errors/authErrors.js';
 import {
   resolveSessionId,
   shouldResetConversation,
@@ -116,11 +128,26 @@ router.post('/messages', async (req, res) => {
       anthropicRequest.metadata?.mcp_passthrough === true ||
       anthropicRequest.metadata?.mcpPassthrough === true;
 
+    const toolNames = Array.isArray(anthropicRequest.tools)
+      ? anthropicRequest.tools
+        .map((tool) => tool?.name || tool?.function?.name || tool?.custom?.name)
+        .filter((name) => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim())
+      : [];
+    const hasTools = toolNames.length > 0;
+    const toolChoiceConfig = getToolChoiceConfig(anthropicRequest.tool_choice);
+    const stopOnToolUse = !mcpPassthrough &&
+      hasTools &&
+      toolChoiceConfig.allowTools !== false &&
+      toolChoiceConfig.disableParallelToolUse;
+
     log.debug('Processing request', {
       sessionId: sessionId.slice(0, 8) + '...',
       mcpPassthrough,
       thinkingEnabled: thinkingConfig.enabled,
-      hasTools: (anthropicRequest.tools?.length || 0) > 0
+      hasTools,
+      disableParallelToolUse: toolChoiceConfig.disableParallelToolUse,
+      stopOnToolUse
     });
 
     const transformerOptions = {
@@ -128,7 +155,9 @@ router.post('/messages', async (req, res) => {
       maxTokens: hopGPTRequest.max_tokens,
       stopSequences: hopGPTRequest.stop_sequences,
       systemPrompt,
-      mcpPassthrough
+      mcpPassthrough,
+      stopOnToolUse,
+      toolNames
     };
 
     // Determine if streaming
@@ -190,11 +219,11 @@ async function handleStreamingRequest(client, hopGPTRequest, transformer, res, r
   res.on('close', onClose);
 
   try {
-    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true });
+    const hopGPTResponse = await client.sendMessage(hopGPTRequest, { stream: true, signal: abortController.signal });
 
     await pipeSSEStream(hopGPTResponse, res, (event) => {
       return transformer.transformEvent(event);
-    }, abortController.signal);
+    }, abortController.signal, { autoEndOnMessageStop: true });
 
     // Ensure the stream is properly terminated even if HopGPT didn't send a final event
     // This prevents clients from hanging indefinitely waiting for message_stop
@@ -340,6 +369,14 @@ function mergeConversationStates(storedState, requestState) {
 function handleError(error, res) {
   log.error('Request failed', { error: error.message, type: error.constructor.name });
 
+  if (error instanceof AuthError) {
+    const resolved = mapAuthErrorResponse(error);
+    if (resolved.retryAfterSeconds) {
+      res.setHeader('Retry-After', resolved.retryAfterSeconds);
+    }
+    return res.status(resolved.statusCode).json(resolved.payload);
+  }
+
   if (error instanceof HopGPTError) {
     const statusCode = error.statusCode >= 400 && error.statusCode < 600 ? error.statusCode : 502;
     const responseBody = typeof error.responseBody === 'string' ? error.responseBody : '';
@@ -398,6 +435,30 @@ function mapErrorResponse({ statusCode, message, responseBody, fallbackType, ret
   const resolvedStatus = statusCode >= 400 && statusCode < 600 ? statusCode : 502;
   const resolvedType = fallbackType || (resolvedStatus >= 500 ? 'api_error' : 'invalid_request_error');
   return buildErrorResponse(resolvedStatus, resolvedType, errorText, retryAfterSeconds);
+}
+
+function mapAuthErrorResponse(error) {
+  let statusCode = 500;
+  let errorType = 'api_error';
+
+  if (error instanceof RefreshTokenExpiredError || error instanceof TokenRefreshError) {
+    statusCode = 401;
+    errorType = 'authentication_error';
+  } else if (error instanceof CloudflareBlockedError) {
+    statusCode = 503;
+    errorType = 'api_error';
+  } else if (error instanceof NetworkError) {
+    statusCode = 502;
+    errorType = 'api_error';
+  }
+
+  return mapErrorResponse({
+    statusCode,
+    message: error.message,
+    responseBody: '',
+    fallbackType: errorType,
+    retryAfterMs: null
+  });
 }
 
 function buildErrorResponse(statusCode, errorType, message, retryAfterSeconds) {

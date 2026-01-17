@@ -53,8 +53,116 @@ const TOOL_TAG_CLOSINGS = {
   'tool_use': ['</tool_use>', '</tool_call>']
 };
 
+const DEFAULT_MAX_TOOL_CALL_BUFFER_SIZE = 1000000;
+const CONFIGURED_TOOL_CALL_BUFFER_SIZE = Number.parseInt(process.env.HOPGPT_TOOL_CALL_BUFFER_SIZE, 10);
+const MAX_TOOL_CALL_BUFFER_SIZE = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_SIZE) &&
+  CONFIGURED_TOOL_CALL_BUFFER_SIZE > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_SIZE
+  : DEFAULT_MAX_TOOL_CALL_BUFFER_SIZE;
+
+const DEFAULT_TOOL_CALL_BUFFER_WARN_THRESHOLD = 50000;
+const DEFAULT_TOOL_CALL_BUFFER_WARN_STEP = 200000;
+const CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD = Number.parseInt(
+  process.env.HOPGPT_TOOL_CALL_BUFFER_WARN_THRESHOLD,
+  10
+);
+const CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP = Number.parseInt(
+  process.env.HOPGPT_TOOL_CALL_BUFFER_WARN_STEP,
+  10
+);
+const TOOL_CALL_BUFFER_WARN_THRESHOLD = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD) &&
+  CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_WARN_THRESHOLD
+  : DEFAULT_TOOL_CALL_BUFFER_WARN_THRESHOLD;
+const TOOL_CALL_BUFFER_WARN_STEP = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP) &&
+  CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_WARN_STEP
+  : DEFAULT_TOOL_CALL_BUFFER_WARN_STEP;
+
+const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
+const TOOL_INSTRUCTION_MARKERS = [
+  '# available tools',
+  '## tool definitions',
+  'you have access to the following tools',
+  'important: you must use this exact xml format to call tools'
+];
+const SANITIZE_TAIL_LENGTH = 120;
+const DUPLICATE_TEXT_CHUNK_MIN_LENGTH = 80;
+const ROLE_PREFIX_RE = /(^|\r?\n)\s*(?:H:|A:|Human:|Assistant:)\s*/g;
+
 function includesAny(haystack, needles) {
   return needles.some(tag => haystack.includes(tag));
+}
+
+function findToolInstructionStartIndex(text, fromIndex = 0) {
+  if (!text) {
+    return -1;
+  }
+  const lower = text.toLowerCase();
+  let earliest = -1;
+  for (const marker of TOOL_INSTRUCTION_MARKERS) {
+    const idx = lower.indexOf(marker, fromIndex);
+    if (idx !== -1 && (earliest === -1 || idx < earliest)) {
+      earliest = idx;
+    }
+  }
+  return earliest;
+}
+
+function findNextAssistantMarkerIndex(text, fromIndex = 0) {
+  if (!text) {
+    return -1;
+  }
+  const re = /(^|\r?\n)\s*(?:A:|Assistant:)\s*/g;
+  re.lastIndex = fromIndex;
+  const match = re.exec(text);
+  return match ? match.index : -1;
+}
+
+function stripRolePrefixes(text) {
+  if (!text) {
+    return text;
+  }
+  return text.replace(ROLE_PREFIX_RE, '$1');
+}
+
+function stripToolInstructionLeak(text) {
+  if (!text) {
+    return text;
+  }
+
+  let result = text;
+  while (true) {
+    const startIndex = findToolInstructionStartIndex(result, 0);
+    if (startIndex === -1) {
+      break;
+    }
+
+    const assistantIndex = findNextAssistantMarkerIndex(result, startIndex);
+    if (assistantIndex === -1) {
+      result = result.slice(0, startIndex);
+      break;
+    }
+
+    result = result.slice(0, startIndex) + result.slice(assistantIndex);
+  }
+
+  return result;
+}
+
+function sanitizeTextFull(text) {
+  return stripRolePrefixes(stripToolInstructionLeak(text));
+}
+
+function normalizeToolNameToken(value) {
+  if (!value || typeof value !== 'string') {
+    return '';
+  }
+  // Remove all non-alphanumeric characters for fuzzy matching
+  // This allows "todo_write" to match "todowrite"
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
 }
 
 function isLikelyToolTagStart(text, index, tagName) {
@@ -100,6 +208,20 @@ function findNextToolTag(text, fromIndex) {
   return null;
 }
 
+/**
+ * Find the closing tag for a given tag name, respecting JSON string boundaries.
+ * This function properly handles closing tag text that appears inside JSON strings
+ * by tracking whether we're inside a double-quoted string.
+ *
+ * IMPORTANT: This function only tracks double quotes (") for string boundaries,
+ * which is correct for JSON (JSON spec only allows double quotes for strings).
+ * Single-quoted strings are not standard JSON and will not be handled correctly.
+ *
+ * @param {string} text - The text to search
+ * @param {number} fromIndex - The index to start searching from
+ * @param {string} tagName - The tag name to find the closing tag for
+ * @returns {{startIndex: number, endIndex: number}|null} The position of the closing tag or null
+ */
 function findClosingTagMatch(text, fromIndex, tagName) {
   const closingTags = TOOL_TAG_CLOSINGS[tagName] || [`</${tagName}>`];
   const lower = text.toLowerCase();
@@ -155,6 +277,90 @@ function findClosingTagMatch(text, fromIndex, tagName) {
   return null;
 }
 
+function findClosingTagMatchLoose(text, fromIndex, tagName) {
+  const closingTags = TOOL_TAG_CLOSINGS[tagName] || [`</${tagName}>`];
+  const lower = text.toLowerCase();
+  let bestIndex = -1;
+  let bestTag = null;
+
+  for (const tag of closingTags) {
+    const index = lower.indexOf(tag, fromIndex);
+    if (index !== -1 && (bestIndex === -1 || index < bestIndex)) {
+      bestIndex = index;
+      bestTag = tag;
+    }
+  }
+
+  if (bestIndex === -1 || !bestTag) {
+    return null;
+  }
+
+  return { startIndex: bestIndex, endIndex: bestIndex + bestTag.length };
+}
+
+/**
+ * Find the closing tag for an XML element, using the last occurrence strategy.
+ * This is useful for XML elements like <parameter> where the content may contain
+ * text that looks like a closing tag (e.g., "</parameter>") but isn't actually
+ * meant to close the current element.
+ *
+ * The strategy is to find the last closing tag before:
+ * - The next opening tag of the same type, OR
+ * - The end of the parent container (e.g., </invoke>)
+ *
+ * @param {string} text - The text to search
+ * @param {number} fromIndex - The index to start searching from (after the opening tag's >)
+ * @param {string} tagName - The tag name to match
+ * @param {string[]} boundaryTags - Tags that mark the boundary (e.g., ['</invoke>', '</function_calls>'])
+ * @returns {{startIndex: number, endIndex: number}|null} The position of the closing tag or null
+ */
+function findClosingTagByLastOccurrence(text, fromIndex, tagName, boundaryTags = []) {
+  const lower = text.toLowerCase();
+  const closeTag = `</${tagName.toLowerCase()}>`;
+  const openTagPattern = `<${tagName.toLowerCase()}`;
+
+  // Find the boundary - either the next opening tag of the same type or a boundary tag
+  let boundaryIndex = text.length;
+
+  // Check for next opening tag of the same type (another parameter)
+  let nextOpenIdx = fromIndex;
+  while (true) {
+    nextOpenIdx = lower.indexOf(openTagPattern, nextOpenIdx);
+    if (nextOpenIdx === -1) break;
+    // Make sure it's actually a tag (followed by whitespace or >)
+    const afterTag = text[nextOpenIdx + openTagPattern.length];
+    if (afterTag === '>' || afterTag === ' ' || afterTag === '\t' || afterTag === '\n' || afterTag === '\r') {
+      boundaryIndex = Math.min(boundaryIndex, nextOpenIdx);
+      break;
+    }
+    nextOpenIdx++;
+  }
+
+  // Check boundary tags
+  for (const boundaryTag of boundaryTags) {
+    const idx = lower.indexOf(boundaryTag.toLowerCase(), fromIndex);
+    if (idx !== -1) {
+      boundaryIndex = Math.min(boundaryIndex, idx);
+    }
+  }
+
+  // Find the LAST closing tag before the boundary
+  let lastCloseIdx = -1;
+  let searchIdx = fromIndex;
+  while (true) {
+    const idx = lower.indexOf(closeTag, searchIdx);
+    if (idx === -1 || idx >= boundaryIndex) break;
+    lastCloseIdx = idx;
+    searchIdx = idx + 1;
+  }
+
+  if (lastCloseIdx === -1) {
+    return null;
+  }
+
+  return { startIndex: lastCloseIdx, endIndex: lastCloseIdx + closeTag.length };
+}
+
 function extractToolCallSegments(text) {
   const segments = [];
   if (!text) {
@@ -176,7 +382,10 @@ function extractToolCallSegments(text) {
       return { segments, lastIndex: nextTag.index };
     }
 
-    const closingMatch = findClosingTagMatch(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    let closingMatch = findClosingTagMatch(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatchLoose(text, nextTag.startTagEnd + 1, nextTag.tagName);
+    }
     if (!closingMatch) {
       return { segments, lastIndex: nextTag.index };
     }
@@ -231,7 +440,11 @@ function extractXmlTagValueSafe(source, tagName) {
   }
 
   const startIndex = openMatch.index + openMatch[0].length;
-  const closingMatch = findClosingTagMatch(source, startIndex, tagName);
+  let closingMatch = findClosingTagMatch(source, startIndex, tagName);
+  // Fall back to loose matching for malformed JSON (e.g., unescaped quotes)
+  if (!closingMatch) {
+    closingMatch = findClosingTagMatchLoose(source, startIndex, tagName);
+  }
   if (!closingMatch) {
     return null;
   }
@@ -243,9 +456,74 @@ function extractXmlAttribute(source, tagName, attrName) {
   if (!source) {
     return null;
   }
-  const matcher = new RegExp(`<${tagName}[^>]*\\s${attrName}=["']([^"']*)["']`, 'i');
-  const match = source.match(matcher);
-  return match ? match[1] : null;
+
+  // Find the opening tag (case-insensitive)
+  const tagRe = new RegExp(`<${tagName}\\b`, 'i');
+  const tagMatch = source.match(tagRe);
+  if (!tagMatch || tagMatch.index === undefined) {
+    return null;
+  }
+
+  // Find the end of the opening tag
+  const tagStart = tagMatch.index;
+  const tagEnd = source.indexOf('>', tagStart);
+  if (tagEnd === -1) {
+    return null;
+  }
+
+  const tagContent = source.slice(tagStart, tagEnd + 1);
+
+  // Look for the attribute - handle both quoted and unquoted values
+  // Match: attrName="value" or attrName='value' with proper escape handling
+  const attrRe = new RegExp(`\\b${attrName}\\s*=\\s*`, 'i');
+  const attrMatch = tagContent.match(attrRe);
+  if (!attrMatch || attrMatch.index === undefined) {
+    return null;
+  }
+
+  const valueStart = attrMatch.index + attrMatch[0].length;
+  const quoteChar = tagContent[valueStart];
+
+  // Handle quoted values
+  if (quoteChar === '"' || quoteChar === "'") {
+    let value = '';
+    let escaped = false;
+    for (let i = valueStart + 1; i < tagContent.length; i++) {
+      const ch = tagContent[i];
+      if (escaped) {
+        // Handle common XML/HTML escapes and JSON escapes
+        if (ch === quoteChar || ch === '\\') {
+          value += ch;
+        } else {
+          // Keep the backslash for other escapes (like \n, \t)
+          value += '\\' + ch;
+        }
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === quoteChar) {
+        return value;
+      }
+      value += ch;
+    }
+    // Unterminated quote - return what we have
+    return value || null;
+  }
+
+  // Handle unquoted values (stop at whitespace or >)
+  let value = '';
+  for (let i = valueStart; i < tagContent.length; i++) {
+    const ch = tagContent[i];
+    if (/\s/.test(ch) || ch === '>' || ch === '/') {
+      break;
+    }
+    value += ch;
+  }
+  return value || null;
 }
 
 function stripCdata(source) {
@@ -316,6 +594,89 @@ function escapeUnescapedControlChars(jsonStr) {
   return result;
 }
 
+function findNextNonWhitespace(source, startIndex) {
+  if (!source || startIndex < 0) {
+    return null;
+  }
+  for (let i = startIndex; i < source.length; i++) {
+    const ch = source[i];
+    if (!/\s/.test(ch)) {
+      return ch;
+    }
+  }
+  return null;
+}
+
+function repairMalformedStringEscapes(jsonStr) {
+  if (!jsonStr || typeof jsonStr !== 'string') {
+    return jsonStr;
+  }
+
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < jsonStr.length; i++) {
+    const ch = jsonStr[i];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        result += ch;
+        continue;
+      }
+
+      if (ch === '\\') {
+        const next = jsonStr[i + 1];
+        if (!next) {
+          result += '\\\\';
+          continue;
+        }
+        if (VALID_JSON_ESCAPES.has(next)) {
+          if (next === 'u') {
+            const hex = jsonStr.slice(i + 2, i + 6);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+              result += '\\\\';
+              continue;
+            }
+          }
+          result += ch;
+          escaped = true;
+          continue;
+        }
+        result += '\\\\';
+        continue;
+      }
+
+      if (ch === '"') {
+        const nextNonWhitespace = findNextNonWhitespace(jsonStr, i + 1);
+        if (nextNonWhitespace === null ||
+            nextNonWhitespace === ':' ||
+            ',}]'.includes(nextNonWhitespace)) {
+          inString = false;
+          result += ch;
+        } else {
+          result += '\\"';
+        }
+        continue;
+      }
+
+      result += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      result += ch;
+      continue;
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
 function parseEmbeddedJson(value) {
   if (typeof value !== 'string') {
     return value;
@@ -325,11 +686,8 @@ function parseEmbeddedJson(value) {
     return value;
   }
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      return JSON.parse(trimmed);
-    } catch (error) {
-      return value;
-    }
+    const parsed = parseJsonWithRepair(trimmed);
+    return parsed !== null ? parsed : value;
   }
   return value;
 }
@@ -343,8 +701,25 @@ function parseJsonWithRepair(jsonText) {
     return null;
   }
   const escaped = escapeUnescapedControlChars(cleaned);
-  const attempts = [cleaned, escaped, repairMalformedArrayJson(cleaned), repairMalformedArrayJson(escaped)]
-    .filter((value, index, self) => typeof value === 'string' && self.indexOf(value) === index);
+  const attempts = new Set();
+  const addAttempt = (value) => {
+    if (typeof value === 'string' && value.length > 0) {
+      attempts.add(value);
+    }
+  };
+
+  const baseValues = [cleaned, escaped];
+  for (const base of baseValues) {
+    addAttempt(base);
+
+    const arrayRepaired = repairMalformedArrayJson(base);
+    addAttempt(arrayRepaired);
+
+    const stringRepaired = repairMalformedStringEscapes(base);
+    addAttempt(stringRepaired);
+    addAttempt(repairMalformedArrayJson(stringRepaired));
+    addAttempt(repairMalformedStringEscapes(arrayRepaired));
+  }
 
   for (const attempt of attempts) {
     try {
@@ -358,8 +733,22 @@ function parseJsonWithRepair(jsonText) {
 }
 
 function parseToolCallJsonContent(jsonContent) {
-  const parsed = parseJsonWithRepair(jsonContent);
-  if (!parsed || typeof parsed !== 'object') {
+  const attemptParse = (value) => {
+    const parsed = parseJsonWithRepair(value);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    return parsed;
+  };
+
+  let parsed = attemptParse(jsonContent);
+  if (!parsed) {
+    const extracted = extractFirstJsonObject(jsonContent);
+    if (extracted && extracted !== jsonContent) {
+      parsed = attemptParse(extracted);
+    }
+  }
+  if (!parsed) {
     return null;
   }
   const toolName = parsed.name;
@@ -372,6 +761,101 @@ function parseToolCallJsonContent(jsonContent) {
     arguments: parseEmbeddedJson(args),
     toolUseId: parsed.id || parsed.toolUseId || null
   };
+}
+
+function pickFirstString(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function normalizeQuestionOption(option) {
+  if (typeof option === 'string') {
+    return { description: option };
+  }
+  if (!option || typeof option !== 'object' || Array.isArray(option)) {
+    return option;
+  }
+  if (typeof option.description === 'string') {
+    return option;
+  }
+
+  const fallback = pickFirstString(option.label, option.value, option.text, option.title, option.name);
+  if (fallback !== null) {
+    return { ...option, description: fallback };
+  }
+  if (option.description !== undefined) {
+    return { ...option, description: String(option.description) };
+  }
+  return { ...option, description: '' };
+}
+
+function normalizeQuestionsInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return input;
+  }
+  if (!Array.isArray(input.questions)) {
+    return input;
+  }
+
+  let questionsChanged = false;
+  const normalizedQuestions = input.questions.map((question) => {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) {
+      return question;
+    }
+
+    let questionChanged = false;
+    let normalized = question;
+
+    if (typeof question.header !== 'string' || question.header.trim().length === 0) {
+      const headerFallback = pickFirstString(
+        question.question,
+        question.title,
+        question.text,
+        question.prompt
+      );
+      if (headerFallback) {
+        normalized = { ...normalized, header: headerFallback };
+        questionChanged = true;
+      }
+    }
+
+    if (Array.isArray(question.options)) {
+      let optionsChanged = false;
+      const normalizedOptions = question.options.map((option) => {
+        const normalizedOption = normalizeQuestionOption(option);
+        if (normalizedOption !== option) {
+          optionsChanged = true;
+        }
+        return normalizedOption;
+      });
+      if (optionsChanged) {
+        normalized = { ...normalized, options: normalizedOptions };
+        questionChanged = true;
+      }
+    }
+
+    if (questionChanged) {
+      questionsChanged = true;
+      return normalized;
+    }
+    return question;
+  });
+
+  if (!questionsChanged) {
+    return input;
+  }
+  return { ...input, questions: normalizedQuestions };
+}
+
+function normalizeToolInput(toolName, input) {
+  if (!input || typeof input !== 'object') {
+    return input;
+  }
+  return normalizeQuestionsInput(input);
 }
 
 function getLeadingTagName(block) {
@@ -421,6 +905,21 @@ function findMatchingBrace(source, startIndex) {
   }
 
   return -1;
+}
+
+function extractFirstJsonObject(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+  const startIndex = text.indexOf('{');
+  if (startIndex === -1) {
+    return null;
+  }
+  const endIndex = findMatchingBrace(text, startIndex);
+  if (endIndex === -1) {
+    return null;
+  }
+  return text.slice(startIndex, endIndex + 1);
 }
 
 /**
@@ -570,9 +1069,10 @@ function repairMalformedArrayJson(jsonStr) {
 }
 
 function parseMcpToolCallBlock(block) {
-  const serverName = extractXmlTagValue(block, 'server_name');
-  const toolName = extractXmlTagValue(block, 'tool_name');
-  const argsText = extractXmlTagValue(block, 'arguments');
+  // Use safe extraction to handle nested closing tags in JSON content
+  const serverName = extractXmlTagValueSafe(block, 'server_name');
+  const toolName = extractXmlTagValueSafe(block, 'tool_name');
+  const argsText = extractXmlTagValueSafe(block, 'arguments');
 
   if (!toolName) {
     return null;
@@ -613,14 +1113,74 @@ function parseInvokeBlock(invokeBlock) {
     return null;
   }
 
-  // Extract all parameters - handle both antml:parameter and parameter tags
-  const parameterRe = /<(?:antml:)?parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/(?:antml:)?parameter>/gi;
+  // Extract all parameters using last-occurrence strategy
+  // This handles parameter values that contain </parameter> as literal text
+  // by finding the last closing tag before the next parameter or end of invoke
   const args = {};
-  let paramMatch;
-  while ((paramMatch = parameterRe.exec(invokeBlock)) !== null) {
-    const paramName = paramMatch[1];
-    const paramValue = paramMatch[2].trim();
-    args[paramName] = paramValue;
+  const paramTagRe = /<(?:antml:)?parameter\s+name\s*=\s*/gi;
+  let paramTagMatch;
+
+  // Determine boundary tags based on the invoke block type
+  const boundaryTags = ['</invoke>', '</invoke>'];
+
+  while ((paramTagMatch = paramTagRe.exec(invokeBlock)) !== null) {
+    const paramStart = paramTagMatch.index;
+
+    // Determine if this is an antml: prefixed parameter
+    const isAntml = invokeBlock.slice(paramStart, paramStart + 20).toLowerCase().includes('antml:');
+    const tagBaseName = isAntml ? 'antml:parameter' : 'parameter';
+
+    // Extract the parameter name from the tag
+    const afterMatch = invokeBlock.slice(paramTagMatch.index + paramTagMatch[0].length);
+    const quoteChar = afterMatch[0];
+    if (quoteChar !== '"' && quoteChar !== "'") {
+      continue;
+    }
+
+    // Find the end of the parameter name
+    let paramName = '';
+    let nameEnd = -1;
+    for (let i = 1; i < afterMatch.length; i++) {
+      if (afterMatch[i] === quoteChar) {
+        paramName = afterMatch.slice(1, i);
+        nameEnd = i;
+        break;
+      }
+    }
+    if (!paramName) {
+      continue;
+    }
+
+    // Find the > that closes the opening tag
+    const tagCloseOffset = afterMatch.indexOf('>', nameEnd);
+    if (tagCloseOffset === -1) {
+      continue;
+    }
+
+    // Calculate the absolute position where the value starts
+    const valueStartPos = paramTagMatch.index + paramTagMatch[0].length + tagCloseOffset + 1;
+
+    // Use last-occurrence strategy to find the proper closing tag
+    // This handles cases where the parameter value contains </parameter> as text
+    // by finding the LAST closing tag before the next parameter or end of invoke
+    let closingMatch = findClosingTagByLastOccurrence(invokeBlock, valueStartPos, tagBaseName, boundaryTags);
+
+    // Fall back to JSON-string-aware matching
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatch(invokeBlock, valueStartPos, tagBaseName);
+    }
+
+    // Fall back to loose matching as last resort
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatchLoose(invokeBlock, valueStartPos, tagBaseName);
+    }
+
+    if (closingMatch) {
+      const paramValue = invokeBlock.slice(valueStartPos, closingMatch.startIndex).trim();
+      args[paramName] = paramValue;
+      // Move the regex past this parameter to continue searching
+      paramTagRe.lastIndex = closingMatch.endIndex;
+    }
   }
 
   return {
@@ -633,17 +1193,52 @@ function parseInvokeBlock(invokeBlock) {
 /**
  * Parse <function_calls> block containing one or more <invoke> blocks
  * Also handles antml: namespace variants used by Claude Code
+ * Uses string-boundary-aware parsing to handle nested </invoke> in content
  */
 function parseFunctionCallsBlock(block) {
-  const invokeRe = /<(?:antml:)?invoke[^>]*>[\s\S]*?<\/(?:antml:)?invoke>/gi;
   const toolCalls = [];
+  const invokeTagRe = /<(?:antml:)?invoke\b/gi;
   let invokeMatch;
-  while ((invokeMatch = invokeRe.exec(block)) !== null) {
-    const toolCall = parseInvokeBlock(invokeMatch[0]);
-    if (toolCall) {
-      toolCalls.push(toolCall);
+
+  while ((invokeMatch = invokeTagRe.exec(block)) !== null) {
+    const invokeStart = invokeMatch.index;
+
+    // Find the end of the opening tag
+    const tagEnd = block.indexOf('>', invokeStart);
+    if (tagEnd === -1) {
+      continue;
+    }
+
+    // Determine which closing tag to look for based on the opening tag
+    const openingTag = block.slice(invokeStart, tagEnd + 1).toLowerCase();
+    const isAntml = openingTag.includes('antml:');
+    const closingTagName = isAntml ? 'antml:invoke' : 'invoke';
+
+    // Use string-boundary-aware matching to find the proper closing tag
+    let closingMatch = findClosingTagMatch(block, tagEnd + 1, closingTagName);
+    if (!closingMatch && isAntml) {
+      // Try without namespace as fallback
+      closingMatch = findClosingTagMatch(block, tagEnd + 1, 'invoke');
+    }
+    if (!closingMatch) {
+      // Fall back to loose matching
+      closingMatch = findClosingTagMatchLoose(block, tagEnd + 1, closingTagName);
+    }
+    if (!closingMatch && isAntml) {
+      closingMatch = findClosingTagMatchLoose(block, tagEnd + 1, 'invoke');
+    }
+
+    if (closingMatch) {
+      const invokeBlock = block.slice(invokeStart, closingMatch.endIndex);
+      const toolCall = parseInvokeBlock(invokeBlock);
+      if (toolCall) {
+        toolCalls.push(toolCall);
+      }
+      // Move the regex past this invoke block to continue searching
+      invokeTagRe.lastIndex = closingMatch.endIndex;
     }
   }
+
   return toolCalls;
 }
 
@@ -702,8 +1297,14 @@ function parseToolUseBlock(block) {
 
   if (inputText && inputText.length > 0) {
     const trimmedInput = inputText.trim();
-    const repairedInput = parseJsonWithRepair(trimmedInput);
-    parsedArgs = repairedInput !== null ? repairedInput : trimmedInput;
+    let repairedInput = parseJsonWithRepair(trimmedInput);
+    if (repairedInput === null) {
+      const extracted = extractFirstJsonObject(trimmedInput);
+      if (extracted) {
+        repairedInput = parseJsonWithRepair(extracted);
+      }
+    }
+    parsedArgs = repairedInput !== null ? repairedInput : { _raw: trimmedInput };
   }
 
   return {
@@ -761,14 +1362,115 @@ function parseAnyToolCallBlock(block) {
   return [];
 }
 
-function splitMcpToolCalls(text) {
+function parseIncompleteToolCallBlocks(block, options = {}) {
+  if (!block) {
+    return [];
+  }
+
+  const leadingTag = getLeadingTagName(block);
+  if (!leadingTag) {
+    return [];
+  }
+
+  const allowFunctionCalls = options.allowFunctionCalls !== false;
+
+  if (allowFunctionCalls) {
+    if (leadingTag === 'function_calls' || leadingTag === 'antml:function_calls') {
+      return parseFunctionCallsBlock(block);
+    }
+    if (leadingTag === 'invoke' || leadingTag === 'antml:invoke') {
+      const toolCall = parseInvokeBlock(block);
+      return toolCall ? [toolCall] : [];
+    }
+  }
+
+  if (leadingTag === 'tool_call') {
+    const startTagEnd = block.indexOf('>');
+    if (startTagEnd === -1) {
+      return [];
+    }
+    const jsonContent = block.slice(startTagEnd + 1).trim();
+    if (!jsonContent) {
+      return [];
+    }
+    const toolCall = parseToolCallJsonContent(jsonContent);
+    if (!toolCall) {
+      return [];
+    }
+    return [{
+      serverName: null,
+      toolName: toolCall.toolName,
+      toolUseId: toolCall.toolUseId,
+      arguments: toolCall.arguments
+    }];
+  }
+
+  if (leadingTag === 'tool_use') {
+    const startTagEnd = block.indexOf('>');
+    if (startTagEnd === -1) {
+      return [];
+    }
+    const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
+    const toolName = extractXmlAttribute(block, 'tool_use', 'name');
+    const inputText = stripCdata(block.slice(startTagEnd + 1));
+
+    if (toolName) {
+      let parsedArgs = {};
+      if (inputText && inputText.trim().length > 0) {
+        const trimmedInput = inputText.trim();
+        let repairedInput = parseJsonWithRepair(trimmedInput);
+        if (repairedInput === null) {
+          const extracted = extractFirstJsonObject(trimmedInput);
+          if (extracted) {
+            repairedInput = parseJsonWithRepair(extracted);
+          }
+        }
+        parsedArgs = repairedInput !== null ? repairedInput : { _raw: trimmedInput };
+      }
+      return [{
+        serverName: null,
+        toolName,
+        toolUseId,
+        arguments: parsedArgs
+      }];
+    }
+
+    if (!inputText) {
+      return [];
+    }
+    const toolCall = parseToolCallJsonContent(inputText);
+    if (!toolCall) {
+      return [];
+    }
+    return [{
+      serverName: null,
+      toolName: toolCall.toolName,
+      toolUseId: toolUseId || toolCall.toolUseId,
+      arguments: toolCall.arguments
+    }];
+  }
+
+  return [];
+}
+
+function splitMcpToolCalls(text, allowIncomplete = false) {
   if (!text) {
     return [];
   }
 
   const { segments, lastIndex } = extractToolCallSegments(text);
   if (lastIndex < text.length) {
-    segments.push({ type: 'text', text: text.slice(lastIndex) });
+    const remainder = text.slice(lastIndex);
+    if (allowIncomplete) {
+      const incompleteBlocks = parseIncompleteToolCallBlocks(remainder);
+      if (incompleteBlocks.length > 0) {
+        for (const toolCall of incompleteBlocks) {
+          segments.push({ type: 'tool_call', toolCall });
+        }
+        return segments;
+      }
+    }
+    segments.push({ type: 'text', text: remainder });
   }
   return segments;
 }
@@ -776,9 +1478,9 @@ function splitMcpToolCalls(text) {
 function splitStreamTextForMcpToolCalls(text) {
   const segments = [];
 
-  // Maximum buffer size before we give up waiting for a closing tag
-  // This prevents infinite buffering when text contains partial tag-like content
-  const MAX_BUFFER_SIZE = 8000;
+  // Maximum buffer size before we give up waiting for a closing tag.
+  // Keep this large enough for file-edit tool calls while still bounded.
+  const MAX_BUFFER_SIZE = MAX_TOOL_CALL_BUFFER_SIZE;
 
   const { segments: parsedSegments, lastIndex } = extractToolCallSegments(text);
   segments.push(...parsedSegments);
@@ -793,8 +1495,22 @@ function splitStreamTextForMcpToolCalls(text) {
     const startIndex = nextTag.index;
     const potentialRemainder = trailing.slice(startIndex);
     if (potentialRemainder.length > MAX_BUFFER_SIZE) {
-      segments.push({ type: 'text', text: trailing });
-      return { segments, remainder: '' };
+      const incompleteBlocks = parseIncompleteToolCallBlocks(potentialRemainder, {
+        allowFunctionCalls: false
+      });
+      if (incompleteBlocks.length > 0) {
+        if (startIndex > 0) {
+          segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
+        }
+        for (const toolCall of incompleteBlocks) {
+          segments.push({ type: 'tool_call', toolCall });
+        }
+        return { segments, remainder: '' };
+      }
+      if (startIndex > 0) {
+        segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
+      }
+      return { segments, remainder: potentialRemainder };
     }
     if (startIndex > 0) {
       segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
@@ -888,6 +1604,7 @@ export class HopGPTToAnthropicTransformer {
     this.currentBlockIndex = -1;  // Will be incremented when blocks start
     this.currentBlockType = null; // 'thinking', 'text', or 'tool_use'
     this.blockStarted = false;    // Track if current block has started
+    this.hasEmittedNonThinkingContent = false;
 
     // Accumulated content for non-streaming responses
     this.contentBlocks = [];      // Array of {type, content, signature?}
@@ -895,6 +1612,8 @@ export class HopGPTToAnthropicTransformer {
     this.accumulatedThinking = '';
     this.thinkingSignature = null;
     this.mcpToolCallBuffer = '';
+    this._toolBufferWarningEmitted = false;
+    this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
 
     // Tool use support
     this.currentToolUse = null;   // Current tool use being streamed {id, name, inputJson}
@@ -906,6 +1625,35 @@ export class HopGPTToAnthropicTransformer {
     // This is needed for clients like OpenCode that parse and execute tool calls
     // directly from the text stream.
     this.mcpPassthrough = options.mcpPassthrough ?? false;
+
+    this.availableToolNames = Array.isArray(options.toolNames)
+      ? options.toolNames
+        .filter((name) => typeof name === 'string' && name.trim().length > 0)
+        .map((name) => name.trim())
+      : [];
+    this.availableToolNameSet = new Set(this.availableToolNames);
+    this.availableToolNameLowerMap = new Map();
+    this.availableToolNamesNormalized = [];
+    for (const name of this.availableToolNames) {
+      const lower = name.toLowerCase();
+      if (!this.availableToolNameLowerMap.has(lower)) {
+        this.availableToolNameLowerMap.set(lower, name);
+      }
+      this.availableToolNamesNormalized.push({
+        name,
+        normalized: normalizeToolNameToken(name)
+      });
+    }
+    this.genericMcpToolName = this._detectGenericMcpToolName();
+
+    // Stop streaming once a tool_use is emitted (Anthropic tool-use behavior).
+    this.stopOnToolUse = options.stopOnToolUse ?? false;
+    this._stopRequested = false;
+    this._suppressOutput = false;
+
+    this._textSanitizeBuffer = '';
+    this._toolLeakActive = false;
+    this._lastTextChunk = null;
 
     this.maxTokens = normalizeMaxTokens(options.maxTokens);
     this.stopSequences = normalizeStopSequences(options.stopSequences);
@@ -921,7 +1669,12 @@ export class HopGPTToAnthropicTransformer {
   transformEvent(event) {
     try {
       const data = JSON.parse(event.data);
-      return this._transformData(data);
+      const suppressOutput = this._suppressOutput;
+      const events = this._transformData(data);
+      if (suppressOutput) {
+        return null;
+      }
+      return events;
     } catch (error) {
       log.error('Failed to parse SSE event', { error: error.message });
       return null;
@@ -929,11 +1682,16 @@ export class HopGPTToAnthropicTransformer {
   }
 
   _transformData(data) {
-    // Debug logging to trace what HopGPT sends
-    log.debug('Processing HopGPT event', { eventType: data.event || (data.created ? 'created' : data.final ? 'final' : 'unknown') });
-
     // Event type 1: Initial message created
     if (data.created && data.message) {
+      const createdMessageId = data.message?.messageId || data.message?.id;
+      if (createdMessageId && !this.responseMessageId) {
+        this.responseMessageId = createdMessageId;
+      }
+      const createdConversationId = data.message?.conversationId || data.conversation?.conversationId;
+      if (createdConversationId && !this.conversationId) {
+        this.conversationId = createdConversationId;
+      }
       return this._createMessageStart();
     }
 
@@ -962,6 +1720,16 @@ export class HopGPTToAnthropicTransformer {
           cacheThinkingSignature(this.thinkingSignature, 'claude');
         }
 
+        if (this.stopOnToolUse && this._stopRequested && !this._hasEmittedMessageStop) {
+          this.mcpToolCallBuffer = '';
+          this._toolBufferWarningEmitted = false;
+          this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
+          const stopEvents = this._createMessageStop();
+          if (stopEvents) {
+            events.push(...stopEvents);
+          }
+        }
+
         return events.length > 0 ? events : null;
       }
       return null;
@@ -969,8 +1737,14 @@ export class HopGPTToAnthropicTransformer {
 
     // Event type 4: final - end of stream
     if (data.final) {
-      this.conversationId = data.conversation?.conversationId;
-      this.responseMessageId = data.responseMessage?.messageId;
+      const finalConversationId = data.conversation?.conversationId;
+      if (finalConversationId) {
+        this.conversationId = finalConversationId;
+      }
+      const finalMessageId = data.responseMessage?.messageId;
+      if (finalMessageId) {
+        this.responseMessageId = finalMessageId;
+      }
       this.inputTokens = data.responseMessage?.promptTokens || 0;
       this.outputTokens = data.responseMessage?.tokenCount || 0;
       this.hopGPTStopReason = data.responseMessage?.stopReason ??
@@ -989,14 +1763,116 @@ export class HopGPTToAnthropicTransformer {
       }
 
       // Extract content blocks from final message for non-streaming
-      if (data.responseMessage?.content) {
-        this._extractFinalContent(data.responseMessage.content);
+      const finalContent = this._normalizeFinalContent(data.responseMessage);
+      if (finalContent) {
+        this._extractFinalContent(finalContent);
       }
 
-      return this._createMessageStop();
+      if (this._hasEmittedMessageStop) {
+        return null;
+      }
+
+      const events = [];
+      if (finalContent && finalContent.length > 0 && !this.hasEmittedNonThinkingContent) {
+        this.mcpToolCallBuffer = '';
+        this._toolBufferWarningEmitted = false;
+        this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
+        const finalEvents = this._emitFinalContentBlocks(finalContent);
+        if (finalEvents.length > 0) {
+          events.push(...finalEvents);
+        }
+      }
+
+      const stopEvents = this._createMessageStop();
+      if (stopEvents) {
+        events.push(...stopEvents);
+      }
+
+      return events.length > 0 ? events : null;
     }
 
     return null;
+  }
+
+  _sanitizeTextChunk(text) {
+    if (!text) {
+      return '';
+    }
+
+    let source = `${this._textSanitizeBuffer}${text}`;
+    this._textSanitizeBuffer = '';
+    let output = '';
+
+    let processing = source;
+    let processLimit = processing.length;
+    if (!this._toolLeakActive && processing.length > SANITIZE_TAIL_LENGTH) {
+      processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+    }
+
+    while (processing.length > 0) {
+      if (this._toolLeakActive) {
+        const assistantIndex = findNextAssistantMarkerIndex(processing, 0);
+        if (assistantIndex === -1) {
+          this._textSanitizeBuffer = processing.slice(-SANITIZE_TAIL_LENGTH);
+          return stripRolePrefixes(output);
+        }
+        processing = processing.slice(assistantIndex);
+        this._toolLeakActive = false;
+        processLimit = processing.length;
+        if (processing.length > SANITIZE_TAIL_LENGTH) {
+          processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+        }
+        continue;
+      }
+
+      const startIndex = findToolInstructionStartIndex(processing, 0);
+      if (startIndex === -1 || startIndex >= processLimit) {
+        output += processing.slice(0, processLimit);
+        processing = processing.slice(processLimit);
+        break;
+      }
+
+      output += processing.slice(0, startIndex);
+      const assistantIndex = findNextAssistantMarkerIndex(processing, startIndex);
+      if (assistantIndex === -1) {
+        this._toolLeakActive = true;
+        this._textSanitizeBuffer = processing.slice(startIndex);
+        return stripRolePrefixes(output);
+      }
+
+      processing = processing.slice(assistantIndex);
+      processLimit = processing.length;
+      if (processing.length > SANITIZE_TAIL_LENGTH) {
+        processLimit = processing.length - SANITIZE_TAIL_LENGTH;
+      }
+    }
+
+    if (!this._toolLeakActive) {
+      this._textSanitizeBuffer = processing;
+    }
+
+    return stripRolePrefixes(output);
+  }
+
+  _flushSanitizedText() {
+    if (!this._textSanitizeBuffer) {
+      this._toolLeakActive = false;
+      return '';
+    }
+
+    let remaining = this._textSanitizeBuffer;
+    this._textSanitizeBuffer = '';
+
+    if (this._toolLeakActive) {
+      const assistantIndex = findNextAssistantMarkerIndex(remaining, 0);
+      this._toolLeakActive = false;
+      if (assistantIndex === -1) {
+        return '';
+      }
+      remaining = remaining.slice(assistantIndex);
+    }
+
+    return sanitizeTextFull(remaining);
   }
 
   /**
@@ -1043,33 +1919,56 @@ export class HopGPTToAnthropicTransformer {
 
     // Handle text blocks
     if (block.type === 'text' && block.text) {
+      const sanitizedText = this._sanitizeTextChunk(block.text);
+      if (!sanitizedText) {
+        return events.length > 0 ? events : null;
+      }
+
       // In passthrough mode, don't parse MCP tool calls - just emit text as-is
       if (this.mcpPassthrough) {
-        events.push(...this._emitTextDelta(block.text));
+        events.push(...this._emitTextDelta(sanitizedText));
         return events.length > 0 ? events : null;
       }
 
       // Debug: Log incoming text for tool call detection
       if (process.env.HOPGPT_DEBUG === 'true') {
-        const hasToolCallTag = block.text.includes('<tool_call') ||
-                               includesAny(block.text, FUNCTION_CALLS_TAGS) ||
-                               block.text.includes(MCP_TOOL_CALL_START_TAG) ||
-                               block.text.includes(TOOL_USE_START_TAG) ||
-                               includesAny(block.text, INVOKE_TAGS);
+        const hasToolCallTag = sanitizedText.includes('<tool_call') ||
+                               includesAny(sanitizedText, FUNCTION_CALLS_TAGS) ||
+                               sanitizedText.includes(MCP_TOOL_CALL_START_TAG) ||
+                               sanitizedText.includes(TOOL_USE_START_TAG) ||
+                               includesAny(sanitizedText, INVOKE_TAGS);
         if (hasToolCallTag) {
-          console.log('[Transform] Text contains tool call XML:', block.text.slice(0, 200));
+          console.log('[Transform] Text contains tool call XML:', sanitizedText.slice(0, 200));
         }
       }
 
-      const combined = `${this.mcpToolCallBuffer}${block.text}`;
+      const combined = `${this.mcpToolCallBuffer}${sanitizedText}`;
       const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
       this.mcpToolCallBuffer = remainder;
 
-      // Debug: Log buffer state when it grows large (potential infinite buffering issue)
-      if (process.env.HOPGPT_DEBUG === 'true') {
-        if (remainder && remainder.length > 500) {
-          console.log('[Transform] WARNING: Large buffer detected:', remainder.length, 'chars. First 200:', remainder.slice(0, 200));
+      if (!remainder) {
+        this._toolBufferWarningEmitted = false;
+        this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
+      }
+
+      if (remainder && remainder.length >= this._nextToolBufferWarningAt) {
+        const preview = remainder.slice(0, 200);
+        log.warn('Large tool call buffer detected', {
+          size: remainder.length,
+          nextWarningAt: this._nextToolBufferWarningAt,
+          preview
+        });
+        if (TOOL_CALL_BUFFER_WARN_STEP > 0) {
+          const steps = Math.floor(
+            (remainder.length - this._nextToolBufferWarningAt) / TOOL_CALL_BUFFER_WARN_STEP
+          ) + 1;
+          this._nextToolBufferWarningAt += steps * TOOL_CALL_BUFFER_WARN_STEP;
+        } else {
+          this._nextToolBufferWarningAt = remainder.length + 1;
         }
+      }
+
+      if (process.env.HOPGPT_DEBUG === 'true') {
         const toolCalls = segments.filter(s => s.type === 'tool_call');
         if (toolCalls.length > 0) {
           console.log(`[Transform] Parsed ${toolCalls.length} tool calls from text`);
@@ -1085,13 +1984,13 @@ export class HopGPTToAnthropicTransformer {
           continue;
         }
         if (segment.type === 'tool_call') {
-          const toolBlock = {
-            type: 'tool_use',
-            id: segment.toolCall.toolUseId || generateToolUseId(),
-            name: segment.toolCall.toolName,
-            input: segment.toolCall.arguments
-          };
-          events.push(...this._processToolUseBlock(toolBlock));
+          const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+          if (toolBlock) {
+            events.push(...this._processToolUseBlock(toolBlock));
+          }
+          if (this.stopOnToolUse) {
+            break;
+          }
         }
       }
 
@@ -1113,7 +2012,11 @@ export class HopGPTToAnthropicTransformer {
    * Extract content blocks from final message
    */
   _extractFinalContent(content) {
+    let stopAfterTool = false;
     for (const block of content) {
+      if (stopAfterTool) {
+        break;
+      }
       if (block.type === 'thinking') {
         if (block.signature) {
           cacheThinkingSignature(block.signature, 'claude');
@@ -1126,20 +2029,37 @@ export class HopGPTToAnthropicTransformer {
       } else if (block.type === 'text') {
         // In passthrough mode, don't parse MCP tool calls - preserve text as-is
         if (this.mcpPassthrough) {
-          if (block.text) {
+          const sanitizedText = sanitizeTextFull(block.text || '');
+          if (sanitizedText) {
+            const lastBlock = this.contentBlocks[this.contentBlocks.length - 1];
+            if (lastBlock?.type === 'text' &&
+                sanitizedText.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+                sanitizedText === lastBlock.text) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'text',
-              text: block.text
+              text: sanitizedText
             });
-            this.accumulatedText += block.text;
+            this.accumulatedText += sanitizedText;
           }
           continue;
         }
 
-        const segments = splitMcpToolCalls(block.text || '');
+        const sanitizedText = sanitizeTextFull(block.text || '');
+        const segments = splitMcpToolCalls(sanitizedText, true);
         for (const segment of segments) {
+          if (stopAfterTool) {
+            break;
+          }
           if (segment.type === 'text') {
             if (!segment.text) continue;
+            const lastBlock = this.contentBlocks[this.contentBlocks.length - 1];
+            if (lastBlock?.type === 'text' &&
+                segment.text.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+                segment.text === lastBlock.text) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'text',
               text: segment.text
@@ -1149,12 +2069,19 @@ export class HopGPTToAnthropicTransformer {
           }
           if (segment.type === 'tool_call') {
             this.hasToolUse = true;
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (!toolBlock) {
+              continue;
+            }
             this.contentBlocks.push({
               type: 'tool_use',
-              id: segment.toolCall.toolUseId || generateToolUseId(),
-              name: segment.toolCall.toolName,
-              input: segment.toolCall.arguments || {}
+              id: toolBlock.id,
+              name: toolBlock.name,
+              input: toolBlock.input
             });
+            if (this.stopOnToolUse) {
+              stopAfterTool = true;
+            }
           }
         }
       } else if (block.type === 'tool_use') {
@@ -1166,9 +2093,10 @@ export class HopGPTToAnthropicTransformer {
           try {
             input = JSON.parse(input);
           } catch (e) {
-            input = {};
+            input = { _raw: input };
           }
         }
+        input = normalizeToolInput(block.name, input);
 
         this.contentBlocks.push({
           type: 'tool_use',
@@ -1176,8 +2104,80 @@ export class HopGPTToAnthropicTransformer {
           name: block.name || '',
           input: input || {}
         });
+        if (this.stopOnToolUse) {
+          stopAfterTool = true;
+        }
       }
     }
+  }
+
+  _emitFinalContentBlocks(content) {
+    if (!Array.isArray(content) || content.length === 0) {
+      return [];
+    }
+
+    const events = [];
+    let stopAfterTool = false;
+
+    for (const block of content) {
+      if (stopAfterTool) {
+        break;
+      }
+
+      if (block.type === 'thinking' && block.thinking) {
+        const blockEvents = this._processContentBlock(block);
+        if (blockEvents) {
+          events.push(...blockEvents);
+        }
+        continue;
+      }
+
+      if (block.type === 'text') {
+        if (this.mcpPassthrough) {
+          const sanitizedText = sanitizeTextFull(block.text || '');
+          if (sanitizedText) {
+            events.push(...this._emitTextDelta(sanitizedText));
+          }
+          continue;
+        }
+
+        const sanitizedText = sanitizeTextFull(block.text || '');
+        const segments = splitMcpToolCalls(sanitizedText, true);
+        for (const segment of segments) {
+          if (stopAfterTool) {
+            break;
+          }
+          if (segment.type === 'text') {
+            if (segment.text) {
+              events.push(...this._emitTextDelta(segment.text));
+            }
+            continue;
+          }
+          if (segment.type === 'tool_call') {
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (toolBlock) {
+              events.push(...this._processToolUseBlock(toolBlock));
+            }
+            if (this.stopOnToolUse) {
+              stopAfterTool = true;
+            }
+          }
+        }
+        continue;
+      }
+
+      if (block.type === 'tool_use') {
+        const blockEvents = this._processToolUseBlock(block);
+        if (blockEvents) {
+          events.push(...blockEvents);
+        }
+        if (this.stopOnToolUse) {
+          stopAfterTool = true;
+        }
+      }
+    }
+
+    return events;
   }
 
   _emitTextDelta(text) {
@@ -1186,6 +2186,18 @@ export class HopGPTToAnthropicTransformer {
     }
 
     const events = [];
+    this.hasEmittedNonThinkingContent = true;
+
+    const startingNewTextBlock = !this.blockStarted || this.currentBlockType !== 'text';
+    if (startingNewTextBlock) {
+      this._lastTextChunk = null;
+    }
+
+    if (this._lastTextChunk &&
+        text.length >= DUPLICATE_TEXT_CHUNK_MIN_LENGTH &&
+        text === this._lastTextChunk) {
+      return [];
+    }
 
     if (this.blockStarted && this.currentBlockType !== 'text') {
       // Save tool use before switching away from tool_use block
@@ -1217,6 +2229,7 @@ export class HopGPTToAnthropicTransformer {
         }
       }
     });
+    this._lastTextChunk = text;
 
     return events;
   }
@@ -1224,6 +2237,10 @@ export class HopGPTToAnthropicTransformer {
   _processToolUseBlock(block) {
     const events = [];
     this.hasToolUse = true;
+    this.hasEmittedNonThinkingContent = true;
+    if (this.stopOnToolUse) {
+      this._stopRequested = true;
+    }
 
     const toolId = block.id || (this.currentToolUse?.id);
     const toolName = block.name || (this.currentToolUse?.name);
@@ -1258,10 +2275,25 @@ export class HopGPTToAnthropicTransformer {
     if (block.input !== undefined) {
       let inputDelta = '';
       if (typeof block.input === 'string') {
-        inputDelta = block.input;
-        this.currentToolUse.inputJson += inputDelta;
+        const trimmedInput = block.input.trim();
+        let parsedInput = null;
+        if (trimmedInput) {
+          parsedInput = parseJsonWithRepair(trimmedInput);
+          if (parsedInput === null) {
+            const extracted = extractFirstJsonObject(trimmedInput);
+            if (extracted) {
+              parsedInput = parseJsonWithRepair(extracted);
+            }
+          }
+        }
+        const normalizedInput = parsedInput && typeof parsedInput === 'object'
+          ? normalizeToolInput(toolName, parsedInput)
+          : { _raw: block.input };
+        inputDelta = JSON.stringify(normalizedInput);
+        this.currentToolUse.inputJson = inputDelta;
       } else if (typeof block.input === 'object') {
-        inputDelta = JSON.stringify(block.input);
+        const normalizedInput = normalizeToolInput(toolName, block.input);
+        inputDelta = JSON.stringify(normalizedInput);
         this.currentToolUse.inputJson = inputDelta;
       }
 
@@ -1461,6 +2493,7 @@ export class HopGPTToAnthropicTransformer {
   _createContentDelta(text) {
     // Legacy method for backward compatibility
     const events = [];
+    this.hasEmittedNonThinkingContent = true;
 
     // Ensure message and text block have started
     if (!this.hasStarted) {
@@ -1498,24 +2531,52 @@ export class HopGPTToAnthropicTransformer {
 
     // Mark that we're emitting message_stop
     this._hasEmittedMessageStop = true;
+    this._suppressOutput = true;
+
+    if (!this.hasStarted) {
+      const startEvents = this._createMessageStart();
+      if (startEvents) {
+        events.push(...startEvents);
+      }
+    }
+
+    const flushedText = this._flushSanitizedText();
+    if (flushedText) {
+      if (this.mcpPassthrough) {
+        events.push(...this._emitTextDelta(flushedText));
+      } else {
+        const combined = `${this.mcpToolCallBuffer}${flushedText}`;
+        const { segments, remainder } = splitStreamTextForMcpToolCalls(combined);
+        this.mcpToolCallBuffer = remainder;
+        for (const segment of segments) {
+          if (segment.type === 'text' && segment.text) {
+            events.push(...this._emitTextDelta(segment.text));
+          } else if (segment.type === 'tool_call') {
+            const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+            if (toolBlock) {
+              events.push(...this._processToolUseBlock(toolBlock));
+            }
+          }
+        }
+      }
+    }
 
     // Flush any remaining buffered MCP tool calls
     if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
-      const segments = splitMcpToolCalls(this.mcpToolCallBuffer);
+      const segments = splitMcpToolCalls(this.mcpToolCallBuffer, true);
       for (const segment of segments) {
         if (segment.type === 'text' && segment.text) {
           events.push(...this._emitTextDelta(segment.text));
         } else if (segment.type === 'tool_call') {
-          const toolBlock = {
-            type: 'tool_use',
-            id: segment.toolCall.toolUseId || generateToolUseId(),
-            name: segment.toolCall.toolName,
-            input: segment.toolCall.arguments
-          };
-          events.push(...this._processToolUseBlock(toolBlock));
+          const toolBlock = this._buildToolUseFromCall(segment.toolCall);
+          if (toolBlock) {
+            events.push(...this._processToolUseBlock(toolBlock));
+          }
         }
       }
       this.mcpToolCallBuffer = '';
+      this._toolBufferWarningEmitted = false;
+      this._nextToolBufferWarningAt = TOOL_CALL_BUFFER_WARN_THRESHOLD;
     }
 
     // Save current tool use if still in progress
@@ -1556,6 +2617,152 @@ export class HopGPTToAnthropicTransformer {
     return events;
   }
 
+  _normalizeFinalContent(responseMessage) {
+    if (!responseMessage || typeof responseMessage !== 'object') {
+      return null;
+    }
+    if (Array.isArray(responseMessage.content)) {
+      return responseMessage.content;
+    }
+    if (typeof responseMessage.content === 'string' && responseMessage.content.trim().length > 0) {
+      return [{ type: 'text', text: responseMessage.content }];
+    }
+    if (typeof responseMessage.text === 'string' && responseMessage.text.trim().length > 0) {
+      return [{ type: 'text', text: responseMessage.text }];
+    }
+    return null;
+  }
+
+  _lookupToolName(candidate) {
+    if (!candidate || this.availableToolNames.length === 0) {
+      return null;
+    }
+    if (this.availableToolNameSet.has(candidate)) {
+      return candidate;
+    }
+    const lower = candidate.toLowerCase();
+    return this.availableToolNameLowerMap.get(lower) || null;
+  }
+
+  _detectGenericMcpToolName() {
+    const candidates = [
+      'mcp',
+      'mcp_tool',
+      'mcp_tool_call',
+      'mcp_tool_use',
+      'mcp_call',
+      'mcp.call'
+    ];
+    for (const candidate of candidates) {
+      const match = this._lookupToolName(candidate);
+      if (match) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  _resolveMcpToolName(serverName, toolName) {
+    if (!serverName || !toolName || this.availableToolNames.length === 0) {
+      return null;
+    }
+
+    const candidates = [
+      `${serverName}__${toolName}`,
+      `${serverName}_${toolName}`,
+      `${serverName}.${toolName}`,
+      `${serverName}/${toolName}`,
+      `${serverName}:${toolName}`,
+      `mcp__${serverName}__${toolName}`,
+      `mcp_${serverName}_${toolName}`,
+      `mcp-${serverName}-${toolName}`
+    ];
+
+    for (const candidate of candidates) {
+      const match = this._lookupToolName(candidate);
+      if (match) {
+        return match;
+      }
+    }
+
+    const normalizedServer = normalizeToolNameToken(serverName);
+    const normalizedTool = normalizeToolNameToken(toolName);
+    if (!normalizedServer || !normalizedTool) {
+      return null;
+    }
+
+    for (const entry of this.availableToolNamesNormalized) {
+      const serverIndex = entry.normalized.indexOf(normalizedServer);
+      if (serverIndex === -1) {
+        continue;
+      }
+      const toolIndex = entry.normalized.indexOf(normalizedTool);
+      if (toolIndex === -1 || toolIndex < serverIndex) {
+        continue;
+      }
+      return entry.name;
+    }
+
+    return null;
+  }
+
+  _resolveToolCall(toolCall) {
+    if (!toolCall) {
+      return null;
+    }
+
+    let resolvedName = toolCall.toolName ? toolCall.toolName.trim() : '';
+    let resolvedInput = toolCall.arguments;
+
+    if (toolCall.serverName) {
+      const matchedName = this._resolveMcpToolName(toolCall.serverName, toolCall.toolName);
+      if (matchedName) {
+        resolvedName = matchedName;
+      } else if (this.genericMcpToolName) {
+        resolvedName = this.genericMcpToolName;
+        resolvedInput = {
+          server_name: toolCall.serverName,
+          tool_name: toolCall.toolName,
+          arguments: resolvedInput ?? {}
+        };
+      }
+    } else if (resolvedName) {
+      const matchedName = this._lookupToolName(resolvedName);
+      if (matchedName) {
+        resolvedName = matchedName;
+      } else if (this.availableToolNamesNormalized.length > 0) {
+        const normalizedCandidate = normalizeToolNameToken(resolvedName);
+        if (normalizedCandidate) {
+          const normalizedMatch = this.availableToolNamesNormalized.find(
+            (entry) => entry.normalized === normalizedCandidate
+          );
+          if (normalizedMatch) {
+            resolvedName = normalizedMatch.name;
+          }
+        }
+      }
+    }
+
+    return {
+      name: resolvedName,
+      input: resolvedInput,
+      toolUseId: toolCall.toolUseId || null
+    };
+  }
+
+  _buildToolUseFromCall(toolCall) {
+    const resolved = this._resolveToolCall(toolCall);
+    if (!resolved || !resolved.name) {
+      return null;
+    }
+    return {
+      type: 'tool_use',
+      id: resolved.toolUseId || generateToolUseId(),
+      name: resolved.name,
+      input: normalizeToolInput(resolved.name, resolved.input)
+    };
+  }
+
   /**
    * Build a complete non-streaming response from accumulated data
    * @returns {object} Anthropic Messages API response
@@ -1594,9 +2801,10 @@ export class HopGPTToAnthropicTransformer {
           try {
             input = JSON.parse(toolUse.inputJson);
           } catch (e) {
-            // If parsing fails, keep empty object
+            input = { _raw: toolUse.inputJson };
           }
         }
+        input = normalizeToolInput(toolUse.name, input);
         content.push({
           type: 'tool_use',
           id: toolUse.id,

@@ -128,11 +128,8 @@ describe('anthropicToHopGPT transformers', () => {
 
     const result = transformAnthropicToHopGPT(request);
 
-    // NOTE: We intentionally use </mcp_tool_call> which does NOT match the <tool_call>
-    // format we instruct the model to use. This is because matching stop sequences
-    // cause the model to stop after EACH tool call, forcing many request round-trips.
-    // A non-matching stop sequence allows the model to batch multiple tool calls.
-    expect(result.stop_sequences).toEqual(['</mcp_tool_call>']);
+    // NOTE: Use a sentinel that won't match tool markup to avoid truncating tool calls.
+    expect(result.stop_sequences).toEqual(['<|hopgpt_tool_stop|>']);
   });
 
   it('treats stop as an alias for stop_sequences and appends tool_call stop', () => {
@@ -144,6 +141,6 @@ describe('anthropicToHopGPT transformers', () => {
 
     const result = transformAnthropicToHopGPT(request);
 
-    expect(result.stop_sequences).toEqual(['<end>', '</mcp_tool_call>']);
+    expect(result.stop_sequences).toEqual(['<end>', '<|hopgpt_tool_stop|>']);
   });
 });
