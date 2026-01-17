@@ -434,7 +434,7 @@ function truncateSchemaDescription(value) {
   if (typeof value !== "string") {
     return "";
   }
-  return value.length > 120 ? `${value.slice(0, 120)}...` : value;
+  return value.length > 500 ? `${value.slice(0, 500)}...` : value;
 }
 
 function formatSchemaDetailLines(schema, depth = 0) {
