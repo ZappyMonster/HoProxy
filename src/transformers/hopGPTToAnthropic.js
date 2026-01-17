@@ -53,6 +53,13 @@ const TOOL_TAG_CLOSINGS = {
   'tool_use': ['</tool_use>', '</tool_call>']
 };
 
+const DEFAULT_MAX_TOOL_CALL_BUFFER_SIZE = 1000000;
+const CONFIGURED_TOOL_CALL_BUFFER_SIZE = Number.parseInt(process.env.HOPGPT_TOOL_CALL_BUFFER_SIZE, 10);
+const MAX_TOOL_CALL_BUFFER_SIZE = Number.isFinite(CONFIGURED_TOOL_CALL_BUFFER_SIZE) &&
+  CONFIGURED_TOOL_CALL_BUFFER_SIZE > 0
+  ? CONFIGURED_TOOL_CALL_BUFFER_SIZE
+  : DEFAULT_MAX_TOOL_CALL_BUFFER_SIZE;
+
 const VALID_JSON_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u']);
 const TOOL_INSTRUCTION_MARKERS = [
   '# available tools',
@@ -562,8 +569,22 @@ function parseJsonWithRepair(jsonText) {
 }
 
 function parseToolCallJsonContent(jsonContent) {
-  const parsed = parseJsonWithRepair(jsonContent);
-  if (!parsed || typeof parsed !== 'object') {
+  const attemptParse = (value) => {
+    const parsed = parseJsonWithRepair(value);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    return parsed;
+  };
+
+  let parsed = attemptParse(jsonContent);
+  if (!parsed) {
+    const extracted = extractFirstJsonObject(jsonContent);
+    if (extracted && extracted !== jsonContent) {
+      parsed = attemptParse(extracted);
+    }
+  }
+  if (!parsed) {
     return null;
   }
   const toolName = parsed.name;
@@ -720,6 +741,21 @@ function findMatchingBrace(source, startIndex) {
   }
 
   return -1;
+}
+
+function extractFirstJsonObject(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+  const startIndex = text.indexOf('{');
+  if (startIndex === -1) {
+    return null;
+  }
+  const endIndex = findMatchingBrace(text, startIndex);
+  if (endIndex === -1) {
+    return null;
+  }
+  return text.slice(startIndex, endIndex + 1);
 }
 
 /**
@@ -1060,14 +1096,95 @@ function parseAnyToolCallBlock(block) {
   return [];
 }
 
-function splitMcpToolCalls(text) {
+function parseIncompleteToolCallBlock(block) {
+  if (!block) {
+    return null;
+  }
+
+  const leadingTag = getLeadingTagName(block);
+  if (!leadingTag) {
+    return null;
+  }
+
+  if (leadingTag === 'tool_call') {
+    const startTagEnd = block.indexOf('>');
+    if (startTagEnd === -1) {
+      return null;
+    }
+    const jsonContent = block.slice(startTagEnd + 1).trim();
+    if (!jsonContent) {
+      return null;
+    }
+    const toolCall = parseToolCallJsonContent(jsonContent);
+    if (!toolCall) {
+      return null;
+    }
+    return {
+      serverName: null,
+      toolName: toolCall.toolName,
+      toolUseId: toolCall.toolUseId,
+      arguments: toolCall.arguments
+    };
+  }
+
+  if (leadingTag === 'tool_use') {
+    const startTagEnd = block.indexOf('>');
+    if (startTagEnd === -1) {
+      return null;
+    }
+    const toolUseId = extractXmlAttribute(block, 'tool_use', 'id');
+    const toolName = extractXmlAttribute(block, 'tool_use', 'name');
+    const inputText = stripCdata(block.slice(startTagEnd + 1));
+
+    if (toolName) {
+      let parsedArgs = {};
+      if (inputText && inputText.trim().length > 0) {
+        const trimmedInput = inputText.trim();
+        const repairedInput = parseJsonWithRepair(trimmedInput);
+        parsedArgs = repairedInput !== null ? repairedInput : trimmedInput;
+      }
+      return {
+        serverName: null,
+        toolName,
+        toolUseId,
+        arguments: parsedArgs
+      };
+    }
+
+    if (!inputText) {
+      return null;
+    }
+    const toolCall = parseToolCallJsonContent(inputText);
+    if (!toolCall) {
+      return null;
+    }
+    return {
+      serverName: null,
+      toolName: toolCall.toolName,
+      toolUseId: toolUseId || toolCall.toolUseId,
+      arguments: toolCall.arguments
+    };
+  }
+
+  return null;
+}
+
+function splitMcpToolCalls(text, allowIncomplete = false) {
   if (!text) {
     return [];
   }
 
   const { segments, lastIndex } = extractToolCallSegments(text);
   if (lastIndex < text.length) {
-    segments.push({ type: 'text', text: text.slice(lastIndex) });
+    const remainder = text.slice(lastIndex);
+    if (allowIncomplete) {
+      const incomplete = parseIncompleteToolCallBlock(remainder);
+      if (incomplete) {
+        segments.push({ type: 'tool_call', toolCall: incomplete });
+        return segments;
+      }
+    }
+    segments.push({ type: 'text', text: remainder });
   }
   return segments;
 }
@@ -1077,7 +1194,7 @@ function splitStreamTextForMcpToolCalls(text) {
 
   // Maximum buffer size before we give up waiting for a closing tag.
   // Keep this large enough for file-edit tool calls while still bounded.
-  const MAX_BUFFER_SIZE = 200000;
+  const MAX_BUFFER_SIZE = MAX_TOOL_CALL_BUFFER_SIZE;
 
   const { segments: parsedSegments, lastIndex } = extractToolCallSegments(text);
   segments.push(...parsedSegments);
@@ -1092,6 +1209,14 @@ function splitStreamTextForMcpToolCalls(text) {
     const startIndex = nextTag.index;
     const potentialRemainder = trailing.slice(startIndex);
     if (potentialRemainder.length > MAX_BUFFER_SIZE) {
+      const incomplete = parseIncompleteToolCallBlock(potentialRemainder);
+      if (incomplete) {
+        if (startIndex > 0) {
+          segments.push({ type: 'text', text: trailing.slice(0, startIndex) });
+        }
+        segments.push({ type: 'tool_call', toolCall: incomplete });
+        return { segments, remainder: '' };
+      }
       segments.push({ type: 'text', text: trailing });
       return { segments, remainder: '' };
     }
@@ -1602,7 +1727,7 @@ export class HopGPTToAnthropicTransformer {
         }
 
         const sanitizedText = sanitizeTextFull(block.text || '');
-        const segments = splitMcpToolCalls(sanitizedText);
+        const segments = splitMcpToolCalls(sanitizedText, true);
         for (const segment of segments) {
           if (stopAfterTool) {
             break;
@@ -1691,7 +1816,7 @@ export class HopGPTToAnthropicTransformer {
         }
 
         const sanitizedText = sanitizeTextFull(block.text || '');
-        const segments = splitMcpToolCalls(sanitizedText);
+        const segments = splitMcpToolCalls(sanitizedText, true);
         for (const segment of segments) {
           if (stopAfterTool) {
             break;
@@ -2086,7 +2211,7 @@ export class HopGPTToAnthropicTransformer {
 
     // Flush any remaining buffered MCP tool calls
     if (this.mcpToolCallBuffer && !this.mcpPassthrough) {
-      const segments = splitMcpToolCalls(this.mcpToolCallBuffer);
+      const segments = splitMcpToolCalls(this.mcpToolCallBuffer, true);
       for (const segment of segments) {
         if (segment.type === 'text' && segment.text) {
           events.push(...this._emitTextDelta(segment.text));
