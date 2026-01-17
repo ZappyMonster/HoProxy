@@ -73,9 +73,12 @@ export class HopGPTClient {
       return null;
     }
 
-    const retryAfter = typeof headers.get === 'function'
-      ? headers.get('retry-after')
-      : headers['retry-after'] || headers['Retry-After'];
+    let retryAfter;
+    if (typeof headers.get === 'function') {
+      retryAfter = headers.get('retry-after');
+    } else {
+      retryAfter = headers['retry-after'] || headers['Retry-After'];
+    }
     if (!retryAfter) {
       return null;
     }

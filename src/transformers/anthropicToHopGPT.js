@@ -9,8 +9,11 @@ function resolveDisableParallelToolUse(toolChoice) {
   if (!toolChoice || typeof toolChoice !== "object") {
     return false;
   }
-  return toolChoice.disable_parallel_tool_use === true ||
-    toolChoice.disableParallelToolUse === true;
+
+  const hasSnakeCaseFlag = toolChoice.disable_parallel_tool_use === true;
+  const hasCamelCaseFlag = toolChoice.disableParallelToolUse === true;
+
+  return hasSnakeCaseFlag || hasCamelCaseFlag;
 }
 
 export function getToolChoiceConfig(toolChoice) {
