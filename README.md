@@ -1,69 +1,67 @@
 # HopGPT Anthropic API Proxy
 
-A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints (notably `/v1/messages`) and translates requests to the HopGPT backend at `https://chat.ai.jh.edu`. Includes browser credential extraction, TLS fingerprinting, conversation state, and automatic token refresh.
+A Node.js/Express proxy server that exposes Anthropic-compatible API endpoints and translates requests to the HopGPT backend at `https://chat.ai.jh.edu`. Use it to connect Claude Code, OpenCode, or any Anthropic SDK client to HopGPT.
 
-## Requirements
+## Table of Contents
 
-- Node.js 18+
+- [Quick Start](#quick-start)
+- [Client Setup](#client-setup)
+  - [Claude Code](#claude-code)
+  - [OpenCode](#opencode)
+  - [Anthropic SDK](#anthropic-sdk)
+- [Available Models](#available-models)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Conversation State](#conversation-state)
+  - [Authentication](#authentication)
+- [Tool Use Support](#tool-use-support)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Testing](#testing)
+- [License](#license)
 
-## Setup
+---
 
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
+## Quick Start
 
-2. **Configure authentication:**
+**Requirements:** Node.js 18+
 
-   **Option A: Automatic extraction (recommended)**
+```bash
+# 1. Install dependencies
+npm install
 
-   Run the extraction script to open a browser, log in, and save credentials to `.env`:
-   ```bash
-   npm run extract
-   ```
+# 2. Extract credentials (opens browser for login)
+npm run extract
 
-   Optional flags:
-   ```bash
-   npm run extract -- --timeout 600 --env-path ./custom.env
-   ```
+# 3. Start the proxy
+npm start
+```
 
-   Optional environment variables for extraction:
-   - `HOPGPT_PUPPETEER_CHANNEL` (default: `chrome`)
-   - `HOPGPT_PUPPETEER_USER_DATA_DIR` (reuse a browser profile)
+The proxy listens on `http://localhost:3001` by default.
 
-   **Option B: Manual extraction**
+### Manual Credential Setup
 
-   Create a `.env` file and set values from your browser session:
-   - Open HopGPT (`https://chat.ai.jh.edu`)
-   - DevTools (F12) → Network tab
-   - Send a message and inspect the request to `/api/agents/chat/AnthropicClaude`
-   - Copy values from headers/cookies:
-     - `Authorization` header → `HOPGPT_BEARER_TOKEN` (optional if refresh token is set)
-     - `User-Agent` header → `HOPGPT_USER_AGENT`
-     - `Cookie` header → individual cookie values
+If automatic extraction fails, create a `.env` file manually:
 
-   Example `.env`:
-   ```bash
-   HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
-   HOPGPT_BEARER_TOKEN=eyJhbGciOiJIUzI1NiIs...
-   HOPGPT_USER_AGENT="Mozilla/5.0 ..."
-   HOPGPT_COOKIE_CF_CLEARANCE=...
-   HOPGPT_COOKIE_CONNECT_SID=...
-   HOPGPT_COOKIE_CF_BM=...
-   HOPGPT_COOKIE_TOKEN_PROVIDER=librechat
-   ```
+1. Open HopGPT (`https://chat.ai.jh.edu`) in your browser
+2. DevTools (F12) → Network tab → send a message
+3. Inspect the request to `/api/agents/chat/AnthropicClaude`
+4. Copy values from headers/cookies:
 
-3. **Start the server:**
-   ```bash
-   npm start
-   ```
+```bash
+# .env (minimum required)
+HOPGPT_COOKIE_REFRESH_TOKEN=eyJhbGciOiJIUzI1NiIs...
 
-   Or with auto-reload for development:
-   ```bash
-   npm run dev
-   ```
+# Optional (auto-obtained via refresh token)
+HOPGPT_BEARER_TOKEN=eyJhbGciOiJIUzI1NiIs...
+HOPGPT_USER_AGENT="Mozilla/5.0 ..."
+HOPGPT_COOKIE_CF_CLEARANCE=...
+HOPGPT_COOKIE_CONNECT_SID=...
+HOPGPT_COOKIE_CF_BM=...
+```
 
-   Set `PORT` to change the listening port (default: `3001`).
+---
 
 ## Claude Code Setup
 
