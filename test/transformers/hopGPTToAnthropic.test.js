@@ -1389,6 +1389,59 @@ line3"}}
     expect(messageStop).toBeTruthy();
   });
 
+  it('recovers incomplete tool_call blocks at end of stream', () => {
+    const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
+      thinkingEnabled: false
+    });
+
+    const events = [];
+    const pushEvents = (data) => {
+      const result = transformer.transformEvent({
+        event: 'message',
+        data: JSON.stringify(data)
+      });
+      if (result) {
+        events.push(...(Array.isArray(result) ? result : [result]));
+      }
+    };
+
+    pushEvents({ created: true, message: { id: 'msg-create' } });
+    pushEvents({
+      event: 'on_message_delta',
+      data: {
+        delta: {
+          content: [
+            { type: 'text', text: '<tool_call>{"name": "Read", "parameters": {"path": "README.md"}}' }
+          ]
+        }
+      }
+    });
+    pushEvents({
+      final: true,
+      responseMessage: {
+        messageId: 'msg-final',
+        promptTokens: 0,
+        tokenCount: 0,
+        stopReason: 'stop',
+        content: []
+      }
+    });
+
+    const toolBlocks = events.filter(evt =>
+      evt.event === 'content_block_start' &&
+      evt.data?.content_block?.type === 'tool_use'
+    );
+    expect(toolBlocks.length).toBe(1);
+    expect(toolBlocks[0].data?.content_block?.name).toBe('Read');
+
+    const inputJson = events
+      .filter(evt => evt.event === 'content_block_delta' && evt.data?.delta?.type === 'input_json_delta')
+      .map(evt => evt.data.delta.partial_json)
+      .join('');
+    const parsedInput = JSON.parse(inputJson);
+    expect(parsedInput.path).toBe('README.md');
+  });
+
   it('does not buffer quoted tool tags in documentation text', () => {
     const transformer = new HopGPTToAnthropicTransformer('claude-sonnet-4-5', {
       thinkingEnabled: false

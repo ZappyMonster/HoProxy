@@ -349,7 +349,7 @@ curl -X POST http://localhost:3001/refresh-token
 | `HOPGPT_COOKIE_TOKEN_PROVIDER` | Token provider (default: `librechat`) |
 | `CONVERSATION_TTL_MS` | In-memory conversation state TTL in ms (default: 21600000) |
 | `HOPGPT_DEBUG` | Enable debug logging for troubleshooting (default: unset) |
-| `HOPGPT_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) |
+| `HOPGPT_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error`, `silent` (default: `info`) |
 | `HOPGPT_LOG_NO_COLOR` | Disable colored log output (default: unset) |
 | `NO_COLOR` | Standard env var to disable colored output (default: unset) |
 | `HOPGPT_STREAMING_TRANSPORT` | Streaming transport: `fetch` or `tls` (default: `fetch`) |
@@ -418,6 +418,7 @@ src/
 ├── errors/
 │   └── authErrors.js           # Authentication error classes
 ├── routes/
+│   ├── index.js                # Route wiring, /health endpoint
 │   ├── messages.js             # /v1/messages endpoint
 │   ├── models.js               # /v1/models endpoints
 │   └── refreshToken.js         # /refresh-token and /token-status endpoints
