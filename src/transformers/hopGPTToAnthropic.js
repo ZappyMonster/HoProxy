@@ -158,10 +158,11 @@ function normalizeToolNameToken(value) {
   if (!value || typeof value !== 'string') {
     return '';
   }
+  // Remove all non-alphanumeric characters for fuzzy matching
+  // This allows "todo_write" to match "todowrite"
   return value
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+    .replace(/[^a-z0-9]+/g, '');
 }
 
 function isLikelyToolTagStart(text, index, tagName) {
@@ -207,6 +208,20 @@ function findNextToolTag(text, fromIndex) {
   return null;
 }
 
+/**
+ * Find the closing tag for a given tag name, respecting JSON string boundaries.
+ * This function properly handles closing tag text that appears inside JSON strings
+ * by tracking whether we're inside a double-quoted string.
+ *
+ * IMPORTANT: This function only tracks double quotes (") for string boundaries,
+ * which is correct for JSON (JSON spec only allows double quotes for strings).
+ * Single-quoted strings are not standard JSON and will not be handled correctly.
+ *
+ * @param {string} text - The text to search
+ * @param {number} fromIndex - The index to start searching from
+ * @param {string} tagName - The tag name to find the closing tag for
+ * @returns {{startIndex: number, endIndex: number}|null} The position of the closing tag or null
+ */
 function findClosingTagMatch(text, fromIndex, tagName) {
   const closingTags = TOOL_TAG_CLOSINGS[tagName] || [`</${tagName}>`];
   const lower = text.toLowerCase();
@@ -281,6 +296,69 @@ function findClosingTagMatchLoose(text, fromIndex, tagName) {
   }
 
   return { startIndex: bestIndex, endIndex: bestIndex + bestTag.length };
+}
+
+/**
+ * Find the closing tag for an XML element, using the last occurrence strategy.
+ * This is useful for XML elements like <parameter> where the content may contain
+ * text that looks like a closing tag (e.g., "</parameter>") but isn't actually
+ * meant to close the current element.
+ *
+ * The strategy is to find the last closing tag before:
+ * - The next opening tag of the same type, OR
+ * - The end of the parent container (e.g., </invoke>)
+ *
+ * @param {string} text - The text to search
+ * @param {number} fromIndex - The index to start searching from (after the opening tag's >)
+ * @param {string} tagName - The tag name to match
+ * @param {string[]} boundaryTags - Tags that mark the boundary (e.g., ['</invoke>', '</function_calls>'])
+ * @returns {{startIndex: number, endIndex: number}|null} The position of the closing tag or null
+ */
+function findClosingTagByLastOccurrence(text, fromIndex, tagName, boundaryTags = []) {
+  const lower = text.toLowerCase();
+  const closeTag = `</${tagName.toLowerCase()}>`;
+  const openTagPattern = `<${tagName.toLowerCase()}`;
+
+  // Find the boundary - either the next opening tag of the same type or a boundary tag
+  let boundaryIndex = text.length;
+
+  // Check for next opening tag of the same type (another parameter)
+  let nextOpenIdx = fromIndex;
+  while (true) {
+    nextOpenIdx = lower.indexOf(openTagPattern, nextOpenIdx);
+    if (nextOpenIdx === -1) break;
+    // Make sure it's actually a tag (followed by whitespace or >)
+    const afterTag = text[nextOpenIdx + openTagPattern.length];
+    if (afterTag === '>' || afterTag === ' ' || afterTag === '\t' || afterTag === '\n' || afterTag === '\r') {
+      boundaryIndex = Math.min(boundaryIndex, nextOpenIdx);
+      break;
+    }
+    nextOpenIdx++;
+  }
+
+  // Check boundary tags
+  for (const boundaryTag of boundaryTags) {
+    const idx = lower.indexOf(boundaryTag.toLowerCase(), fromIndex);
+    if (idx !== -1) {
+      boundaryIndex = Math.min(boundaryIndex, idx);
+    }
+  }
+
+  // Find the LAST closing tag before the boundary
+  let lastCloseIdx = -1;
+  let searchIdx = fromIndex;
+  while (true) {
+    const idx = lower.indexOf(closeTag, searchIdx);
+    if (idx === -1 || idx >= boundaryIndex) break;
+    lastCloseIdx = idx;
+    searchIdx = idx + 1;
+  }
+
+  if (lastCloseIdx === -1) {
+    return null;
+  }
+
+  return { startIndex: lastCloseIdx, endIndex: lastCloseIdx + closeTag.length };
 }
 
 function extractToolCallSegments(text) {
@@ -362,7 +440,11 @@ function extractXmlTagValueSafe(source, tagName) {
   }
 
   const startIndex = openMatch.index + openMatch[0].length;
-  const closingMatch = findClosingTagMatch(source, startIndex, tagName);
+  let closingMatch = findClosingTagMatch(source, startIndex, tagName);
+  // Fall back to loose matching for malformed JSON (e.g., unescaped quotes)
+  if (!closingMatch) {
+    closingMatch = findClosingTagMatchLoose(source, startIndex, tagName);
+  }
   if (!closingMatch) {
     return null;
   }
@@ -374,9 +456,74 @@ function extractXmlAttribute(source, tagName, attrName) {
   if (!source) {
     return null;
   }
-  const matcher = new RegExp(`<${tagName}[^>]*\\s${attrName}=["']([^"']*)["']`, 'i');
-  const match = source.match(matcher);
-  return match ? match[1] : null;
+
+  // Find the opening tag (case-insensitive)
+  const tagRe = new RegExp(`<${tagName}\\b`, 'i');
+  const tagMatch = source.match(tagRe);
+  if (!tagMatch || tagMatch.index === undefined) {
+    return null;
+  }
+
+  // Find the end of the opening tag
+  const tagStart = tagMatch.index;
+  const tagEnd = source.indexOf('>', tagStart);
+  if (tagEnd === -1) {
+    return null;
+  }
+
+  const tagContent = source.slice(tagStart, tagEnd + 1);
+
+  // Look for the attribute - handle both quoted and unquoted values
+  // Match: attrName="value" or attrName='value' with proper escape handling
+  const attrRe = new RegExp(`\\b${attrName}\\s*=\\s*`, 'i');
+  const attrMatch = tagContent.match(attrRe);
+  if (!attrMatch || attrMatch.index === undefined) {
+    return null;
+  }
+
+  const valueStart = attrMatch.index + attrMatch[0].length;
+  const quoteChar = tagContent[valueStart];
+
+  // Handle quoted values
+  if (quoteChar === '"' || quoteChar === "'") {
+    let value = '';
+    let escaped = false;
+    for (let i = valueStart + 1; i < tagContent.length; i++) {
+      const ch = tagContent[i];
+      if (escaped) {
+        // Handle common XML/HTML escapes and JSON escapes
+        if (ch === quoteChar || ch === '\\') {
+          value += ch;
+        } else {
+          // Keep the backslash for other escapes (like \n, \t)
+          value += '\\' + ch;
+        }
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === quoteChar) {
+        return value;
+      }
+      value += ch;
+    }
+    // Unterminated quote - return what we have
+    return value || null;
+  }
+
+  // Handle unquoted values (stop at whitespace or >)
+  let value = '';
+  for (let i = valueStart; i < tagContent.length; i++) {
+    const ch = tagContent[i];
+    if (/\s/.test(ch) || ch === '>' || ch === '/') {
+      break;
+    }
+    value += ch;
+  }
+  return value || null;
 }
 
 function stripCdata(source) {
@@ -922,9 +1069,10 @@ function repairMalformedArrayJson(jsonStr) {
 }
 
 function parseMcpToolCallBlock(block) {
-  const serverName = extractXmlTagValue(block, 'server_name');
-  const toolName = extractXmlTagValue(block, 'tool_name');
-  const argsText = extractXmlTagValue(block, 'arguments');
+  // Use safe extraction to handle nested closing tags in JSON content
+  const serverName = extractXmlTagValueSafe(block, 'server_name');
+  const toolName = extractXmlTagValueSafe(block, 'tool_name');
+  const argsText = extractXmlTagValueSafe(block, 'arguments');
 
   if (!toolName) {
     return null;
@@ -965,14 +1113,74 @@ function parseInvokeBlock(invokeBlock) {
     return null;
   }
 
-  // Extract all parameters - handle both antml:parameter and parameter tags
-  const parameterRe = /<(?:antml:)?parameter\s+name=["']([^"']+)["']>([\s\S]*?)<\/(?:antml:)?parameter>/gi;
+  // Extract all parameters using last-occurrence strategy
+  // This handles parameter values that contain </parameter> as literal text
+  // by finding the last closing tag before the next parameter or end of invoke
   const args = {};
-  let paramMatch;
-  while ((paramMatch = parameterRe.exec(invokeBlock)) !== null) {
-    const paramName = paramMatch[1];
-    const paramValue = paramMatch[2].trim();
-    args[paramName] = paramValue;
+  const paramTagRe = /<(?:antml:)?parameter\s+name\s*=\s*/gi;
+  let paramTagMatch;
+
+  // Determine boundary tags based on the invoke block type
+  const boundaryTags = ['</invoke>', '</invoke>'];
+
+  while ((paramTagMatch = paramTagRe.exec(invokeBlock)) !== null) {
+    const paramStart = paramTagMatch.index;
+
+    // Determine if this is an antml: prefixed parameter
+    const isAntml = invokeBlock.slice(paramStart, paramStart + 20).toLowerCase().includes('antml:');
+    const tagBaseName = isAntml ? 'antml:parameter' : 'parameter';
+
+    // Extract the parameter name from the tag
+    const afterMatch = invokeBlock.slice(paramTagMatch.index + paramTagMatch[0].length);
+    const quoteChar = afterMatch[0];
+    if (quoteChar !== '"' && quoteChar !== "'") {
+      continue;
+    }
+
+    // Find the end of the parameter name
+    let paramName = '';
+    let nameEnd = -1;
+    for (let i = 1; i < afterMatch.length; i++) {
+      if (afterMatch[i] === quoteChar) {
+        paramName = afterMatch.slice(1, i);
+        nameEnd = i;
+        break;
+      }
+    }
+    if (!paramName) {
+      continue;
+    }
+
+    // Find the > that closes the opening tag
+    const tagCloseOffset = afterMatch.indexOf('>', nameEnd);
+    if (tagCloseOffset === -1) {
+      continue;
+    }
+
+    // Calculate the absolute position where the value starts
+    const valueStartPos = paramTagMatch.index + paramTagMatch[0].length + tagCloseOffset + 1;
+
+    // Use last-occurrence strategy to find the proper closing tag
+    // This handles cases where the parameter value contains </parameter> as text
+    // by finding the LAST closing tag before the next parameter or end of invoke
+    let closingMatch = findClosingTagByLastOccurrence(invokeBlock, valueStartPos, tagBaseName, boundaryTags);
+
+    // Fall back to JSON-string-aware matching
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatch(invokeBlock, valueStartPos, tagBaseName);
+    }
+
+    // Fall back to loose matching as last resort
+    if (!closingMatch) {
+      closingMatch = findClosingTagMatchLoose(invokeBlock, valueStartPos, tagBaseName);
+    }
+
+    if (closingMatch) {
+      const paramValue = invokeBlock.slice(valueStartPos, closingMatch.startIndex).trim();
+      args[paramName] = paramValue;
+      // Move the regex past this parameter to continue searching
+      paramTagRe.lastIndex = closingMatch.endIndex;
+    }
   }
 
   return {
@@ -985,17 +1193,52 @@ function parseInvokeBlock(invokeBlock) {
 /**
  * Parse <function_calls> block containing one or more <invoke> blocks
  * Also handles antml: namespace variants used by Claude Code
+ * Uses string-boundary-aware parsing to handle nested </invoke> in content
  */
 function parseFunctionCallsBlock(block) {
-  const invokeRe = /<(?:antml:)?invoke[^>]*>[\s\S]*?<\/(?:antml:)?invoke>/gi;
   const toolCalls = [];
+  const invokeTagRe = /<(?:antml:)?invoke\b/gi;
   let invokeMatch;
-  while ((invokeMatch = invokeRe.exec(block)) !== null) {
-    const toolCall = parseInvokeBlock(invokeMatch[0]);
-    if (toolCall) {
-      toolCalls.push(toolCall);
+
+  while ((invokeMatch = invokeTagRe.exec(block)) !== null) {
+    const invokeStart = invokeMatch.index;
+
+    // Find the end of the opening tag
+    const tagEnd = block.indexOf('>', invokeStart);
+    if (tagEnd === -1) {
+      continue;
+    }
+
+    // Determine which closing tag to look for based on the opening tag
+    const openingTag = block.slice(invokeStart, tagEnd + 1).toLowerCase();
+    const isAntml = openingTag.includes('antml:');
+    const closingTagName = isAntml ? 'antml:invoke' : 'invoke';
+
+    // Use string-boundary-aware matching to find the proper closing tag
+    let closingMatch = findClosingTagMatch(block, tagEnd + 1, closingTagName);
+    if (!closingMatch && isAntml) {
+      // Try without namespace as fallback
+      closingMatch = findClosingTagMatch(block, tagEnd + 1, 'invoke');
+    }
+    if (!closingMatch) {
+      // Fall back to loose matching
+      closingMatch = findClosingTagMatchLoose(block, tagEnd + 1, closingTagName);
+    }
+    if (!closingMatch && isAntml) {
+      closingMatch = findClosingTagMatchLoose(block, tagEnd + 1, 'invoke');
+    }
+
+    if (closingMatch) {
+      const invokeBlock = block.slice(invokeStart, closingMatch.endIndex);
+      const toolCall = parseInvokeBlock(invokeBlock);
+      if (toolCall) {
+        toolCalls.push(toolCall);
+      }
+      // Move the regex past this invoke block to continue searching
+      invokeTagRe.lastIndex = closingMatch.endIndex;
     }
   }
+
   return toolCalls;
 }
 
