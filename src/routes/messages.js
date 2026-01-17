@@ -166,13 +166,11 @@ router.post('/messages', async (req, res) => {
     // Echo the requested model in responses to avoid client-side model validation errors.
     const responseModel = anthropicRequest.model;
 
-    // DIAGNOSTIC: Log exact model names at each stage
-    log.debug('MODEL DIAGNOSTIC', {
-      requestedModel: anthropicRequest.model,
-      strippedModel,
-      mappedHopgpt: modelMapping.hopgptModel,
-      mappedResponse: modelMapping.responseModel,
-      actualResponseModel: responseModel
+    log.debug('Model resolution', {
+      requested: anthropicRequest.model,
+      stripped: strippedModel,
+      hopgpt: modelMapping.hopgptModel,
+      response: responseModel
     });
 
     const transformer = new HopGPTToAnthropicTransformer(responseModel, transformerOptions);

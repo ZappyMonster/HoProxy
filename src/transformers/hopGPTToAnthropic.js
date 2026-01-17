@@ -1930,7 +1930,6 @@ export class HopGPTToAnthropicTransformer {
         return events.length > 0 ? events : null;
       }
 
-      // Debug: Log incoming text for tool call detection
       if (process.env.HOPGPT_DEBUG === 'true') {
         const hasToolCallTag = sanitizedText.includes('<tool_call') ||
                                includesAny(sanitizedText, FUNCTION_CALLS_TAGS) ||
@@ -1938,7 +1937,7 @@ export class HopGPTToAnthropicTransformer {
                                sanitizedText.includes(TOOL_USE_START_TAG) ||
                                includesAny(sanitizedText, INVOKE_TAGS);
         if (hasToolCallTag) {
-          console.log('[Transform] Text contains tool call XML:', sanitizedText.slice(0, 200));
+          log.debug('Text contains tool call XML', { preview: sanitizedText.slice(0, 200) });
         }
       }
 
@@ -1971,10 +1970,10 @@ export class HopGPTToAnthropicTransformer {
       if (process.env.HOPGPT_DEBUG === 'true') {
         const toolCalls = segments.filter(s => s.type === 'tool_call');
         if (toolCalls.length > 0) {
-          console.log(`[Transform] Parsed ${toolCalls.length} tool calls from text`);
-          for (const tc of toolCalls) {
-            console.log('[Transform] Tool call:', tc.toolCall?.toolName);
-          }
+          log.debug('Parsed tool calls from text', {
+            count: toolCalls.length,
+            tools: toolCalls.map(tc => tc.toolCall?.toolName)
+          });
         }
       }
 
